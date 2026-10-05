@@ -1,6 +1,6 @@
 import React from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
-import { alpha, colors, font, layout, radius, shadow, space } from '../ui/theme';
+import { colors, font, layout, radius, shadow, space } from '../ui/theme';
 import { SANS } from '../ui/platform';
 
 /** 底部主 CTA。底色 primary + 白字（实测 5.18:1，过 AA 小字）。 */

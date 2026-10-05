@@ -1,6 +1,6 @@
 import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
-import { colors, font, layout, space } from '../ui/theme';
+import { colors, font, space } from '../ui/theme';
 import { SANS } from '../ui/platform';
 
 /** 区块标题：左边是标题，右边一行说明（可多选 / 已选 N / 可不填…）。 */

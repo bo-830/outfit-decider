@@ -86,3 +86,23 @@ export const ERROR_KINDS = Object.keys(ERRORS);
 export function errorInfo(kind) {
   return ERRORS[kind] || ERRORS.server;
 }
+
+/**
+ * 构造带统一文案的错误对象（AGENTS.md 代码约定：引擎/异常中文文案只允许来自本文件）。
+ * 各引擎模块不得再手写 `new Error('…中文…')` + 自填 kind/action/retryable。
+ */
+export function errorFor(kind, extra = {}) {
+  const info = errorInfo(kind);
+  const err = new Error(info.message);
+  err.kind = ERRORS[kind] ? kind : 'server';
+  err.action = info.action;
+  err.retryable = !!info.retryable;
+  if (info.retryDelayMs !== undefined) err.retryDelayMs = info.retryDelayMs;
+  if (info.silent) err.silent = true;
+  return Object.assign(err, extra);
+}
+
+/** `invalid_input`（图片无法识别出有效穿搭内容）的便捷构造器。 */
+export function invalidInputError(extra = {}) {
+  return errorFor('invalid_input', extra);
+}

@@ -11,7 +11,7 @@ import { makeDeepSystem } from './deepSystem.js';
 import { makeScoreSystem } from './scoreSystem.js';
 import { makeVisionEngine } from './vision.js';
 import { isMeaningfulDescription } from '../core/scoring.js';
-import { UNRECOGNIZABLE } from '../data/copy.js';
+import { invalidInputError } from '../data/copy.js';
 
 const DEFAULT_WEAK_THRESHOLD_MS = 6000;
 
@@ -154,11 +154,7 @@ export function makeOrchestrator({
 }
 
 function invalidInput() {
-  const err = new Error(UNRECOGNIZABLE);
-  err.kind = 'invalid_input';
-  err.action = '换图';
-  err.retryable = false;
-  return err;
+  return invalidInputError();
 }
 
 async function runWithLimit(tasks, limit) {

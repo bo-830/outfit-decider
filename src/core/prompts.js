@@ -253,13 +253,24 @@ export function renderDescription(text) {
   return parts.join('；');
 }
 
-/** 从描述文本中抽取「维度名：内容」的 7 个字段。 */
+/**
+ * 从描述文本中抽取「维度名：内容」的 7 个字段。
+ *
+ * 关键点：**不能**用 `；` 当值的分隔符——描述正文里本来就允许出现 `；`（例如
+ * 「上衣：…袖口挽起；有口袋」）。若用 `[^\n；;]*` 取值，遇到含 `；` 的正文会被从中间截断。
+ * 因此这里以「下一个维度名」或换行作为值的边界，并把 `；` 留在值内。这样
+ * `renderDescription` 用 `；` 拼接后仍能反解析回来（幂等）。
+ */
 export function parseDescriptionFields(text) {
   const out = {};
   if (typeof text !== 'string') return out;
   for (const dimension of DESCRIPTION_DIMENSIONS) {
-    const match = text.match(new RegExp(`${dimension}\\s*[:：]\\s*([^\\n；;]*)`));
-    if (match && match[1].trim()) out[dimension] = match[1].trim();
+    const others = DESCRIPTION_DIMENSIONS.filter((item) => item !== dimension);
+    const boundary = others.length ? `|(?=${others.join('|')}\\s*[:：])` : '';
+    const pattern = new RegExp(`${dimension}\\s*[:：]\\s*([^\\n]*?)(?=\\n${boundary}|$)`, 's');
+    const match = text.match(pattern);
+    const value = match && match[1] ? match[1].trim() : '';
+    if (value) out[dimension] = value.replace(/[；;]\s*$/, '').trim();
   }
   return out;
 }

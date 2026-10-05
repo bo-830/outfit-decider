@@ -72,7 +72,10 @@ export function flowReducer(state, action) {
       const userState = current.userState && typeof current.userState === 'object'
         ? current.userState
         : emptyUserState();
-      const note = typeof action.note === 'string' ? action.note.slice(0, NOTE_MAX_LENGTH) : '';
+      // SPEC §1.1：note「trim 后长度 ≤ 200」——先 trim 再截断，避免尾部空白占满配额。
+      const note = typeof action.note === 'string'
+        ? action.note.trim().slice(0, NOTE_MAX_LENGTH)
+        : '';
       return { ...current, userState: { ...userState, note } };
     }
 

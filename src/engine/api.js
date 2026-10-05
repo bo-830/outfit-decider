@@ -6,7 +6,11 @@
 // 其余（describe_* / 6 个 score 维度）→ System One，用 quickTimeoutMs；显式传 timeoutMs 优先。
 
 import { buildRequest } from '../core/protocol.js';
-import { ERRORS, ERROR_KINDS, errorInfo } from '../data/copy.js';
+import { ERRORS, ERROR_KINDS, errorFor, errorInfo } from '../data/copy.js';
+
+/** SPEC §5.1「重试」列的全局上限：可重试错误自动重投 1 次（退避默认 600ms，rate_limit 用文案里的 2s）。 */
+const AUTO_RETRY_MAX = 1;
+const AUTO_RETRY_DELAY_MS = 600;
 
 export const DEFAULT_CONFIG = {
   mode: 'jev',
@@ -63,7 +67,30 @@ export function makeApi({ config, fetchImpl = globalThis.fetch } = {}) {
     ? fetchImpl
     : (typeof globalThis.fetch === 'function' ? globalThis.fetch.bind(globalThis) : null));
 
+  /**
+   * SPEC §5.1「重试」列：network / timeout / rate_limit / server 自动重投 1 次，
+   * auth / parse / invalid_input / cancelled 一律不重试（重试也只会得到同样结果或放大计费）。
+   * 重试可被调用方的 AbortSignal 立刻打断；不重试时不引入任何额外延迟。
+   */
   async function ask(request = {}) {
+    let lastError = null;
+    for (let attempt = 0; attempt <= AUTO_RETRY_MAX; attempt += 1) {
+      try {
+        return await askOnce(request);
+      } catch (err) {
+        lastError = err;
+        const retryable = err && err.retryable === true && err.kind !== 'cancelled';
+        if (!retryable || attempt === AUTO_RETRY_MAX) throw err;
+        if (request.signal && request.signal.aborted) throw apiError('cancelled');
+        const delay = Number.isFinite(err.retryDelayMs) ? err.retryDelayMs : AUTO_RETRY_DELAY_MS;
+        await sleep(delay, request.signal);
+        if (request.signal && request.signal.aborted) throw apiError('cancelled');
+      }
+    }
+    throw lastError || apiError('server');
+  }
+
+  async function askOnce(request = {}) {
     const cfg = settings();
     const doFetch = resolveFetch();
     const base = normalizeBaseUrl(cfg.baseUrl);
@@ -147,7 +174,7 @@ export function makeApi({ config, fetchImpl = globalThis.fetch } = {}) {
     } catch (err) {
       const ms = Date.now() - started;
       const kind = gate.timedOut ? 'timeout' : classifyError(err).kind;
-      return { ok: false, ms, detail: errorInfo(kind).message || '连接失败' };
+      return { ok: false, ms, detail: errorInfo(kind).message };
     } finally {
       gate.cleanup();
     }
@@ -206,13 +233,7 @@ function statusKind(status) {
 }
 
 function apiError(kind, extra = {}) {
-  const info = errorInfo(kind);
-  const err = new Error(info.message);
-  err.kind = kind;
-  err.action = info.action;
-  err.retryable = info.retryable === true;
-  for (const [key, value] of Object.entries(extra)) err[key] = value;
-  return err;
+  return errorFor(kind, extra);
 }
 
 function normalizeFailure(err, gate) {
@@ -273,6 +294,29 @@ function normalizeUsage(usage) {
 
 function toCount(value) {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
+/** 可被 AbortSignal 打断的退避等待（取消时立即返回，不阻塞调用方）。 */
+function sleep(ms, signal) {
+  const delay = Number.isFinite(ms) && ms > 0 ? ms : 0;
+  if (!delay) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(finish, delay);
+    function finish() {
+      clearTimeout(timer);
+      if (signal && typeof signal.removeEventListener === 'function') {
+        signal.removeEventListener('abort', finish);
+      }
+      resolve();
+    }
+    if (signal && typeof signal.addEventListener === 'function') {
+      if (signal.aborted) {
+        finish();
+        return;
+      }
+      signal.addEventListener('abort', finish, { once: true });
+    }
+  });
 }
 
 function createAbortGate(signal, timeoutMs) {

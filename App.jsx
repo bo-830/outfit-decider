@@ -21,7 +21,7 @@ import HelpScreen from './src/screens/HelpScreen.jsx';
 import ResultScreen from './src/screens/ResultScreen.jsx';
 import SettingsScreen from './src/screens/SettingsScreen.jsx';
 import TabBar from './src/components/TabBar.jsx';
-import { colors, space } from './src/ui/theme.js';
+import { colors } from './src/ui/theme.js';
 
 const IS_WEB = Platform.OS === 'web';
 /** 非机密配置（服务地址 / 模型 / 模式）另存一份，API Key 只走 secureKey.js */
@@ -512,6 +512,9 @@ export default function App() {
       lookId: look.lookId,
       rank: look.rank,
       overall: look.overall,
+      // SPEC §2.1：把 6 维分数一并暴露给冒烟脚本，使脚本仅凭 probe 即可复核
+      // 「6 维且都是 1 位小数」，不必只依赖线上响应与 DOM（那里仍是权威证据，这里是交叉校验）。
+      scores: look.scores || null,
     }));
     const deep = {};
     for (const [lookId, report] of Object.entries(flow.deep || {})) {
@@ -634,7 +637,7 @@ export default function App() {
       <StatusBar style="dark" />
       <SafeAreaView style={styles.root} edges={['top']}>
         <TabBar
-          tab={showHelp ? tab : tab}
+          tab={tab}
           onChange={(next) => {
             setShowHelp(false);
             setTab(next);

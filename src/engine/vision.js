@@ -7,14 +7,14 @@
 
 import { buildDescribeQuestions } from '../core/prompts.js';
 import { toDataUri } from '../core/protocol.js';
-import { UNRECOGNIZABLE } from '../data/copy.js';
+import { invalidInputError } from '../data/copy.js';
 
 /** §3.7 要求"state 传空描述占位"：给一个非空的中性占位串，避免对端把空串判成缺字段。 */
 const DESCRIBE_STATE_PLACEHOLDER = '（本次只做图片客观描述，无用户上下文）';
 
 export function makeVisionEngine({ api, model } = {}) {
   async function describeLook({ artifact, lookId, signal } = {}) {
-    if (!api || typeof api.ask !== 'function') throw invalidInput();
+    if (!api || typeof api.ask !== 'function') throw invalidInputError();
     const response = await api.ask({
       state: DESCRIBE_STATE_PLACEHOLDER,
       questions: buildDescribeQuestions(lookId),
@@ -28,7 +28,7 @@ export function makeVisionEngine({ api, model } = {}) {
       || answers.find((item) => item && item.type === 'text')
       || answers[0];
     const text = answer && typeof answer.content === 'string' ? answer.content.trim() : '';
-    if (!text) throw invalidInput();
+    if (!text) throw invalidInputError();
     return { lookId, text };
   }
 
@@ -39,12 +39,4 @@ export function makeVisionEngine({ api, model } = {}) {
 function describeImages(artifact, lookId) {
   if (!artifact || typeof artifact.base64 !== 'string' || !artifact.mime) return [];
   return [{ id: lookId, dataUri: toDataUri(artifact) }];
-}
-
-function invalidInput() {
-  const err = new Error(UNRECOGNIZABLE);
-  err.kind = 'invalid_input';
-  err.action = '换图';
-  err.retryable = false;
-  return err;
 }

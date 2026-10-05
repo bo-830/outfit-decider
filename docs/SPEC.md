@@ -159,7 +159,7 @@ export const BUILTIN_QUESTIONS = [
 | `testID="engine-mode-jev"` / `"engine-mode-laya"` / `"btn-test-conn"` / `"test-conn-result"` | 设置页：模式切换 / 测试连接 / 结果 |
 | `testID="engine-model"` / `"engine-baseurl"` / `"engine-apikey"` | 设置页：模型名 / baseUrl / API Key 输入框（v1.1 新增，供 verify.mjs 走真实 UI 路径驱动异常场景；model 必须可自由输入任意字符串，不得做白名单或下拉限定） |
 | `testID="probe-json"` | 隐藏节点（`<Text>` 或 `<div>`），内容 = `window.__OD_PROBE__` 的 JSON 序列化，供冒烟脚本读取 |
-| `window.__OD_PROBE__` | 运行状态探针：`{ ready, tab, looks, quick: {ranked: [...]}, deep: {...}, errors: [], lastRequest: {...} | null, privacy: { imageInStorage: bool } }` |
+| `window.__OD_PROBE__` | 运行状态探针：`{ ready, tab, looks, quick: {ranked: [{lookId, rank, overall, scores}]}, deep, errors: [], lastRequest: {...} | null, privacy: { imageInStorage: bool } }`。`ranked[].scores` 为 6 维分数（v1.3 补入契约，供冒烟脚本仅凭 probe 即可交叉校验；权威证据仍是线上响应 + DOM 的 6 行 `dim-row`） |
 
 > 说明：`react-native-web` 会把 `testID` 渲染成 `data-testid`，冒烟脚本按 `[data-testid="..."]` 选择。
 > `window.__OD_PROBE__` 由 `App.jsx` 在每次状态变化后同步（web 平台才挂载，原生忽略）。

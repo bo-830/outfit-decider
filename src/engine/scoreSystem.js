@@ -8,7 +8,7 @@ import {
 } from '../core/protocol.js';
 import { buildScoreQuestions, buildSyntheticStateText, normalizeDescriptions, relevantScoreDimensions } from '../core/prompts.js';
 import { isMeaningfulDescription } from '../core/scoring.js';
-import { ERROR_KINDS, UNRECOGNIZABLE, errorInfo } from '../data/copy.js';
+import { ERROR_KINDS, errorInfo, invalidInputError } from '../data/copy.js';
 
 const LOOK_CONCURRENCY = 4;
 
@@ -161,11 +161,7 @@ function failureOf(kind) {
 }
 
 function invalidInput() {
-  const err = new Error(UNRECOGNIZABLE);
-  err.kind = 'invalid_input';
-  err.action = '换图';
-  err.retryable = false;
-  return err;
+  return invalidInputError();
 }
 
 async function runWithLimit(tasks, limit) {

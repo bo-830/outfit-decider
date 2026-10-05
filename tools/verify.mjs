@@ -364,6 +364,29 @@ async function pollStorage(page, { attempts = 12, intervalMs = 500, match = 'od.
   return last;
 }
 
+/**
+ * 轮询 banner-error 的**文本**直到命中期望文案（而不是只等元素出现）。
+ * 只等元素会出现"上一轮的旧 banner 还在 → 立刻命中 → 拿到旧文案"的假红/假绿，
+ * 这是 #9 在对抗式复核里偶发 timeout=false 的根因。
+ * 返回 {text, elapsedMs, matched}，elapsed 会写进报告，便于判断窗口是否给够。
+ */
+async function waitBannerText(page, mustInclude, timeoutMs) {
+  const t0 = Date.now();
+  let last = null;
+  for (;;) {
+    // eslint-disable-next-line no-await-in-loop
+    last = await textOf(page, '[data-testid="banner-error"]');
+    if (typeof last === 'string' && last.includes(mustInclude)) {
+      return { text: last, elapsedMs: Date.now() - t0, matched: true };
+    }
+    if (Date.now() - t0 >= timeoutMs) {
+      return { text: last, elapsedMs: Date.now() - t0, matched: false };
+    }
+    // eslint-disable-next-line no-await-in-loop
+    await sleep(300);
+  }
+}
+
 /** 往受控输入框里填值（React 受控组件必须用真实键盘事件） */
 async function setInputValue(page, testId, value) {
   const sel = `[data-testid="${testId}"]`;
@@ -798,12 +821,11 @@ async function main() {
         await page.setRequestInterception(true);
         page.on('request', handler);
       };
-      const runQuickExpectBanner = async (timeoutMs) => {
+      const runQuickExpectBanner = async (expectedCopy, timeoutMs) => {
         await clickTestId(page, 'tab-capture');
         await sleep(300);
         await clickTestId(page, 'submit-quick');
-        await page.waitForSelector('[data-testid="banner-error"]', { timeout: timeoutMs });
-        return textOf(page, '[data-testid="banner-error"]');
+        return waitBannerText(page, expectedCopy, timeoutMs);
       };
       const setModelViaUi = async (model) => {
         await clickTestId(page, 'tab-settings');
@@ -814,39 +836,49 @@ async function main() {
 
       const path_ = [];
 
-      // --- auth ---
+      // --- auth ---（窗口给足：UI 路径 + 兜底路径各 90s）
       try {
         await setModelViaUi('test-auth-fail');
-        state.authBanner = await runQuickExpectBanner(60000);
-        path_.push('ui(engine-model=test-auth-fail)');
+        const r = await runQuickExpectBanner(COPY.auth, 90000);
+        state.authBanner = r.text;
+        state.authElapsedMs = r.elapsedMs;
+        if (r.matched) path_.push('ui(engine-model=test-auth-fail)');
       } catch (err) {
         report.stepErrors.push(`auth via settings UI: ${err.message}`);
       }
       if (!state.authBanner || !state.authBanner.includes(COPY.auth)) {
         await enableInterception();
         state.__injectModel = 'test-auth-fail';
-        state.authBanner = await runQuickExpectBanner(60000);
+        const r = await runQuickExpectBanner(COPY.auth, 90000);
+        state.authBanner = r.text;
+        state.authElapsedMs = r.elapsedMs;
         path_.push('intercept(model=test-auth-fail)');
       }
       state.screenshots.push(await shot(page, 'error-auth'));
 
-      // --- timeout + weaknet ---
+      // --- timeout + weaknet ---（20s 超时 × 可能重试 1 次，窗口给到 180s）
       try {
         await setModelViaUi('test-timeout');
-        state.timeoutBanner = await runQuickExpectBanner(150000);
-        path_.push('ui(engine-model=test-timeout)');
+        const r = await runQuickExpectBanner(COPY.timeout, 180000);
+        state.timeoutBanner = r.text;
+        state.timeoutElapsedMs = r.elapsedMs;
+        if (r.matched) path_.push('ui(engine-model=test-timeout)');
       } catch (err) {
         report.stepErrors.push(`timeout via settings UI: ${err.message}`);
       }
       if (!state.timeoutBanner || !state.timeoutBanner.includes(COPY.timeout)) {
         await enableInterception();
         state.__injectModel = 'test-timeout';
-        state.timeoutBanner = await runQuickExpectBanner(150000);
+        const r = await runQuickExpectBanner(COPY.timeout, 180000);
+        state.timeoutBanner = r.text;
+        state.timeoutElapsedMs = r.elapsedMs;
         path_.push('intercept(model=test-timeout)');
       }
       try {
-        await page.waitForSelector('[data-testid="banner-weaknet"]', { timeout: 60000 });
+        const t0 = Date.now();
+        await page.waitForSelector('[data-testid="banner-weaknet"]', { timeout: 90000 });
         state.weaknetBanner = await textOf(page, '[data-testid="banner-weaknet"]');
+        state.weaknetElapsedMs = Date.now() - t0;
       } catch {
         state.weaknetBanner = null;
       }
@@ -890,6 +922,12 @@ async function main() {
       report.evidence.timeoutBanner = state.timeoutBanner;
       report.evidence.weaknetBanner = state.weaknetBanner;
       report.evidence.faultPath = state.faultPath || null;
+      report.evidence.faultTimingMs = {
+        auth: state.authElapsedMs ?? null,
+        timeout: state.timeoutElapsedMs ?? null,
+        weaknet: state.weaknetElapsedMs ?? null,
+      };
+      report.evidence.baseUrlInjected = !!state.baseUrlInjected;
       report.evidence.modelInputAvailable = !!state.modelInputAvailable;
       report.evidence.imagePicker = report.evidence.imagePicker || null;
       report.screenshots = Object.fromEntries(state.screenshots.map((f) => [path.basename(f, '.png'), path.relative(ROOT, f)]));
@@ -1030,7 +1068,11 @@ async function main() {
     );
   }
 
-  // 4 结果页按序渲染
+  // 4 结果页按降序渲染（§7.4）
+  // ⚠ 语义边界（t-A 对抗式复核确认）：本断言只验「DOM 卡片顺序 == probe.ranked 数组顺序」，
+  //    **不验排序正确性**——如果引擎把 ranked 整体逆序返回，DOM 会同步变成 [4,3,2,1]，
+  //    此时 #4 仍然 PASS，真正抓到错误的是 #2 的 desc 判据。
+  //    排序正确性归 #2 负责，不要把 #4 当排序证据。
   {
     const domRanks = state.domRanks || [];
     const probeRanks = ranked.map((r) => (r.rank == null ? '' : String(r.rank)));
@@ -1041,7 +1083,7 @@ async function main() {
       'result-order',
       '§7.4',
       sameOrder,
-      `dom=[${domRanks.join(',')}] probe=[${probeRanks.join(',')}]`,
+      `dom=[${domRanks.join(',')}] probe=[${probeRanks.join(',')}] scope=render-matches-probe (ordering correctness is #2)`,
     );
   }
 
@@ -1111,11 +1153,21 @@ async function main() {
   }
 
   // 6b 附加门禁：分数自洽（防「综合 5.0 但五维 2-3 分」这类展示矛盾回归）
+  //
+  // 配对规则：**按 lookId 配对**。lookId 取自该次 score 请求 state 里的 `【穿搭N】`
+  // （§3.2 的拼接规则保证每套自己的 state 只带自己的段头），
+  // 与 `answers` 数组下标无关、与 `ranked` 的排列顺序无关。
+  // 因此"逆序返回 ranked"这类缺陷**不会**在这里误报——只有某套自己的
+  // overall 与它自己的 5 维不自洽时才会红。
   {
-    const norm = (s) => String(s || '').replace(/\s+/g, '');
     const CN_LOOK = { 一: 'look1', 二: 'look2', 三: 'look3', 四: 'look4' };
+    const lookIdFromState = (s) => {
+      const m = /【穿搭([一二三四])】/.exec(s || '');
+      return m ? CN_LOOK[m[1]] : null;
+    };
     const dimIds = SCORE_IDS.filter((k) => k !== 'overall_score');
-    const rows = state.scoreExchanges.map((e, i) => {
+    const byLook = new Map();
+    state.scoreExchanges.forEach((e, i) => {
       const answers = Object.fromEntries((e.body?.answers || []).map((a) => [a.id, a.score]));
       const dimensions = {};
       for (const d of dimIds) dimensions[d] = typeof answers[d] === 'number' ? answers[d] : null;
@@ -1123,25 +1175,35 @@ async function main() {
       const mean = nums.length ? Math.round((nums.reduce((a, b) => a + b, 0) / nums.length) * 100) / 100 : null;
       const overall = typeof answers.overall_score === 'number' ? answers.overall_score : null;
       const delta = overall != null && mean != null ? Math.round((overall - mean) * 100) / 100 : null;
-      const m = /【穿搭([一二三四])】/.exec(e.request?.state || '');
-      return {
-        lookId: m ? CN_LOOK[m[1]] : `exchange${i + 1}`,
+      const lookId = lookIdFromState(e.request?.state) || `unknown${i + 1}`;
+      byLook.set(lookId, {
+        lookId,
         overall,
         dimensions,
         mean,
         delta,
         consistent: delta != null && Math.abs(delta) <= 1.0,
-      };
+      });
     });
+    const rows = [...byLook.values()].sort((a, b) => a.lookId.localeCompare(b.lookId));
+    // 交叉核对（集合层面、与顺序无关）：线上 score 的整套 lookId 必须与 probe.ranked 出现的完全一致
+    const wireLooks = [...byLook.keys()].sort().join(',');
+    const probeLooks = ranked
+      .map((r) => r.lookId)
+      .filter(Boolean)
+      .sort()
+      .join(',');
+    const lookSetMatches = rows.length > 0 && wireLooks === probeLooks;
     state.scoreCoherence = rows;
     report.evidence.scoreCoherence = rows;
     report.extras.push({
       id: 'score-coherence',
       gating: true,
-      ok: rows.length > 0 && rows.every((r) => r.consistent),
-      detail: rows.map((r) => `${r.lookId}: overall=${r.overall} mean5=${r.mean} delta=${r.delta} ok=${r.consistent}`).join(' | '),
+      ok: rows.length > 0 && rows.every((r) => r.consistent) && lookSetMatches,
+      detail:
+        rows.map((r) => `${r.lookId}: overall=${r.overall} mean5=${r.mean} delta=${r.delta} ok=${r.consistent}`).join(' | ') +
+        ` || pairing=byLookId(orderIndependent) lookSetMatches=${lookSetMatches}`,
     });
-    void norm;
   }
 
   // 7 console/页面错误（§7.7：只算"我们自己的代码"；浏览器网络层日志单独记录）
@@ -1243,7 +1305,8 @@ async function main() {
       'error-banners',
       '§7.9',
       authOk && timeoutOk && weakOk,
-      `auth=${authOk} timeout=${timeoutOk} weaknet=${weakOk} authText=${JSON.stringify((state.authBanner || '').slice(0, 40))}`,
+      `auth=${authOk}(${state.authElapsedMs ?? '-'}ms) timeout=${timeoutOk}(${state.timeoutElapsedMs ?? '-'}ms) weaknet=${weakOk}(${state.weaknetElapsedMs ?? '-'}ms) ` +
+        `path=${state.faultPath || '-'} authText=${JSON.stringify((state.authBanner || '').slice(0, 30))} timeoutText=${JSON.stringify((state.timeoutBanner || '').slice(0, 30))}`,
     );
   }
 
