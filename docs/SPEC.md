@@ -3,7 +3,8 @@
 > 本文件是并行开发的**唯一契约**。任何实现前必须先读本文件；实现与本文件冲突时，以本文件的签名为准；
 > 需要改契约时由 Lead 改本文件并提交，不得各自改代码后不回写契约。
 
-版本：v1（Phase 0 冻结） · 适用范围：`src/core/**`、`src/data/**`、`src/engine/**`、`src/store/**`、
+版本：v1.3（v1 = Phase 0 冻结；v1.1 新增 §2.1 三个设置页 testID 锚点；v1.2 修正门禁命令形式，见 §7.0；
+v1.3 修正 §3.7：describe 必须带图） · 适用范围：`src/core/**`、`src/data/**`、`src/engine/**`、`src/store/**`、
 `src/ui/theme.js`、`src/components/**`、`src/screens/**`、`App.jsx`、`tools/**`、`tests/**`
 
 ---
@@ -155,7 +156,8 @@ export const BUILTIN_QUESTIONS = [
 | `testID="compare-toggle"` / `testID="compare-view"` | 同屏对比开关 / 对比容器 |
 | `testID="banner-error"` / `testID="banner-weaknet"` | 错误横幅 / 弱网横幅 |
 | `testID="history-item"` / `testID="history-empty"` | 历史记录项 / 空态 |
-| `testID="engine-mode-jev"` / `"engine-mode-laya"` / `"btn-test-conn"` / `"test-conn-result"` | 设置页 |
+| `testID="engine-mode-jev"` / `"engine-mode-laya"` / `"btn-test-conn"` / `"test-conn-result"` | 设置页：模式切换 / 测试连接 / 结果 |
+| `testID="engine-model"` / `"engine-baseurl"` / `"engine-apikey"` | 设置页：模型名 / baseUrl / API Key 输入框（v1.1 新增，供 verify.mjs 走真实 UI 路径驱动异常场景；model 必须可自由输入任意字符串，不得做白名单或下拉限定） |
 | `testID="probe-json"` | 隐藏节点（`<Text>` 或 `<div>`），内容 = `window.__OD_PROBE__` 的 JSON 序列化，供冒烟脚本读取 |
 | `window.__OD_PROBE__` | 运行状态探针：`{ ready, tab, looks, quick: {ranked: [...]}, deep: {...}, errors: [], lastRequest: {...} | null, privacy: { imageInStorage: bool } }` |
 
@@ -289,9 +291,17 @@ export function selectDeepFor(state, lookId)         // → 该套 deep 报告 |
 
 ```js
 export function makeVisionEngine({ api, model })     // → { describeLook({artifact, lookId, signal}): Promise<{lookId, text}> }
-// 用 api.ask 发 {questions: buildDescribeQuestions(lookId)}，state 传空描述占位；
+// 用 api.ask 发 {questions: buildDescribeQuestions(lookId), images: [{id: lookId, dataUri: toDataUri(artifact)}]}，
+// state 传一个**非空的中性占位串**（避免对端把空串判成缺字段）；
 // 返回值取 answers[0].content，trim 后为空 → 抛 {kind:'invalid_input'}
 ```
+
+> **v1.2 修正（重要）**：`describe` **必须带上本套自己的那张图**。System One 第一步的产品定义就是
+> 「调用多模态能力把照片转成结构化纯文字描述」，不带图在真实端点下模型看不到画面。
+> 只带当前这一套（`images` 长度 1，`id === lookId`），不要一次把 4 张都传进去。
+> `artifact` 缺 `mime`/`base64` 时退化为 `images: []`（对端仍可据 `question.id` 作答）。
+> 因此「请求里有没有 `images`」**不能**再用来区分 describe 与 deep —— 两者都带图，
+> 判据一律用 `questions[].id`（`describe_*` vs `deep_report`）。
 
 ### 3.8 `src/engine/scoreSystem.js`
 
@@ -348,7 +358,8 @@ export function classifyError(err)   // → {kind, message, action, retryable}
 export function redactConfig(config) // → 去掉 apiKey 的副本（写日志/报告前必须过这一层）
 ```
 
-- `images` 通道：`images: [{id:'look1', dataUri}]`，仅 System Two 使用；JEv/Laya 双方都接受该字段（mock 亦支持）。
+- `images` 通道：`images: [{id:'look1', dataUri}]`。**System One 的 describe 与 System Two 都会使用**（v1.2 修正，见 §3.7）：
+  describe 只带当前一套（长度 1），System Two 带全部套；JEv/Laya 双方都接受该字段（mock 亦支持）。
 - 错误 `kind` 枚举与中文文案见 §5.1。
 - **API Key 绝不出现在异常 message、日志、`window.__OD_PROBE__` 和验证报告中**。
 
@@ -481,7 +492,10 @@ mock 服务据 `images` 长度与 `state` 文本决定"看"到几套。
   - `"model": "test-auth-fail"` → `401 {"error":{"message":"invalid api key"}}`
   - `"model": "test-server-error"` → `500`
   - `"model": "test-parse-fail"` → `200` 返回 `not-json`（`Content-Type: text/plain`）
-  - `"model": "test-timeout"` → 挂起 30s 后返回（用于弱网/超时提示）
+  - `"model": "test-timeout"` → 挂起后返回（用于弱网/超时提示）；**挂起时长由 `MOCK_TIMEOUT_MS` 环境变量控制，默认 30000**。
+    注意：System One 的 describe/score 走 `quickTimeoutMs`（默认 20s），System Two 走 `timeoutMs`（默认 45s）；
+    浏览器端跑 §7 断言 9 时把 `MOCK_TIMEOUT_MS` 压到 **1000**（否则要么等 20s、要么比 20s 预算还长而永不超时）。
+    引擎侧的超时/退避语义由 `tests/api.test.js` 的 node 单测负责，浏览器端只验证 UI 提示链路。
   - `"model": "test-unrecognizable"` → describe 答案 content 全为「未清晰显示」
   - `"model": "test-partial-fail"` → 只有 `look1` 的 describe 为空 content，其余正常
 - 启动后 stdout 打印 ASCII：`mock listening on 0.0.0.0:8787`。
@@ -499,6 +513,22 @@ tests/helpers/fetchMock.js                        # 内存 fetch 替身，按 UR
 
 ## 7. 验收断言清单（`node tools/verify.mjs` 必须逐条产出）
 
+### 7.0 门禁命令形式（v1.2 修正 · 环境实测）
+
+Node v24.18.0 下 `node --test tests/`（目录形式）**必然失败**：v24 把位置参数当测试文件执行，
+不再展开目录，报 `Cannot find module ...\tests`。已在纯 ASCII 目录复现，与中文路径无关。
+因此全仓库统一使用 glob 形式：
+
+```
+node --test "tests/**/*.test.js"      # 单测（cwd = 项目根）
+node tools/verify.mjs                 # 全链路验收
+```
+
+`package.json` 的 `test` / `gate` 脚本已是 glob 形式；`verify.mjs` 若要跑单测也必须用 glob，
+并在报告里记录真实 pass/fail 数。
+
+### 7.1 断言清单
+
 1. `mock` 可达：`GET /health` 200。
 2. System One：`ranked` 非空、按 `overall` 降序、每套恰好 6 个维度且全部 ∈ [0,5] 且为 1 位小数。
 3. System One 响应体中**无解释性文本**：所有 answer `type==='score'`，无多余 `content` 用于展示（正则断言不含"建议/推荐/因为你/显得"）。
@@ -506,8 +536,11 @@ tests/helpers/fetchMock.js                        # 内存 fetch 替身，按 UR
 5. System Two：报告三段齐全（ranking/details/conclusion），stars ⊆ [0,5]、pros ≥2、cons ≥1、suggestions ≥1、pick ∈ lookIds。
 6. 同屏对比：`compareOpen` 后 `[data-testid="compare-view"]` 内同时存在「快速评分」与「深度分析」两个标签。
 7. `console.error === 0` 且 `pageerror === 0`（我们自己的代码；第三方 warning 单独计数记录）。
-8. 隐私：storage dump 不含 `data:image` / `base64`；probe 里 `privacy.imageInStorage === false`。
+8. 隐私：storage dump 不含 `data:image` / `base64`；probe 里 `privacy.imageInStorage === false`；
+   **且 `JSON.stringify(window.__OD_PROBE__)` 不含 `data:image`、`base64`、API Key 明文**（v1.1 加强）。
 9. 异常：`test-auth-fail` → `banner-error` 文案命中 §5.1 `auth`；`test-timeout` 路径 → 命中 `timeout` 且出现 `banner-weaknet`。
+   **优先走真实 UI 路径**（设置页 `engine-model` 填 `test-auth-fail` 等），请求拦截仅作备用，
+   报告须写明本次实际走的是哪条路径。
 10. 历史：跑完一次后 history 有 1 条，`looks[].description` 非空、无图片字段。
 11. 截图产物存在：`artifacts/screens/{capture,result,compare,history,settings}.png`。
 12. 报告写 `artifacts/verify-report.json`（UTF-8），字段含 `assertErrors: []`、`consoleErrors: 0`。

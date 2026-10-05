@@ -11,10 +11,10 @@
     "lan": "expo start --lan",
     "web": "expo start --web",
     "export:web": "expo export --platform web",
-    "test": "node --test tests/",
+    "test": "node --test \"tests/**/*.test.js\"",
     "mock": "node tools/mock-jev-server.mjs",
     "verify": "node tools/verify.mjs",
-    "gate": "node --test tests/ && node tools/verify.mjs"
+    "gate": "node --test \"tests/**/*.test.js\" && node tools/verify.mjs"
   },
   "dependencies": {
     "@react-native-async-storage/async-storage": "2.2.0",

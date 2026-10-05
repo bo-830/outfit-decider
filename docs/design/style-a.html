@@ -1,0 +1,402 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>方向 A · 晨光试衣间</title>
+<style>
+*,*::before,*::after{box-sizing:border-box}
+:root{
+  --desk:#24242A;
+  --bg:#F6F1E8;
+  --surface:#FFFCF7;
+  --surface-2:#EFE7DA;
+  --line:#E3D9C9;
+  --line-strong:#D3C6B0;
+  --ink:#231E17;
+  --ink-2:#6B6154;
+  --ink-3:#A79C8C;
+  --amber:#C4761C;
+  --amber-soft:#F6E7CF;
+  --green:#5E7A4B;
+  --danger:#B4553A;
+  --sans:"PingFang SC","Microsoft YaHei","Noto Sans SC",system-ui,-apple-system,sans-serif;
+  --r-lg:20px; --r-md:14px; --r-sm:10px; --r-pill:999px;
+  --paper:0 1px 2px rgba(75,58,35,.07), 0 14px 26px -20px rgba(75,58,35,.6);
+  --paper-lift:0 2px 4px rgba(75,58,35,.10), 0 22px 34px -22px rgba(75,58,35,.7);
+}
+body{margin:0;background:var(--desk);font-family:var(--sans);color:var(--ink);-webkit-font-smoothing:antialiased}
+.app{width:390px;margin:0 auto;display:flex;flex-direction:column;gap:26px;padding:26px 0}
+.screen{background:var(--bg);min-height:844px;display:flex;flex-direction:column;position:relative}
+.screen.clip{height:844px;min-height:0;overflow:hidden}
+.pad{padding-left:16px;padding-right:16px}
+.num{font-variant-numeric:tabular-nums}
+
+/* 状态栏与 Tab */
+.status{display:flex;justify-content:space-between;align-items:center;padding:13px 20px 4px;font-size:12px;color:var(--ink-2)}
+.status-l{font-variant-numeric:tabular-nums;letter-spacing:.02em}
+.status-r{display:flex;gap:5px;align-items:center;opacity:.6}
+.status-r i{display:block;width:13px;height:8px;border:1.2px solid currentColor;border-radius:2px}
+.status-r i:last-child{width:20px;background:linear-gradient(90deg,currentColor 62%,transparent 62%)}
+.tabs{display:flex;gap:22px;overflow-x:auto;padding:8px 20px 0;margin-bottom:2px}
+.tabs::-webkit-scrollbar{display:none}
+.tab{font-size:15px;color:var(--ink-3);padding:6px 0 10px;border-bottom:2px solid transparent;white-space:nowrap}
+.tab.on{color:var(--ink);font-weight:600;border-bottom-color:var(--ink)}
+
+/* 标题区 */
+.head{padding-top:14px;padding-bottom:14px}
+.head h1{margin:0;font-size:26px;font-weight:600;letter-spacing:-.02em}
+.head p{margin:6px 0 0;font-size:12.5px;color:var(--ink-2)}
+.head p b{font-weight:600;color:var(--ink)}
+
+/* 照片网格 */
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.shot{position:relative;margin:0;border-radius:var(--r-md);overflow:hidden;background:var(--surface-2);border:1px solid var(--line);box-shadow:var(--paper);aspect-ratio:4/5}
+.shot img{display:block;width:100%;height:100%;object-fit:cover}
+.shot .no{position:absolute;left:8px;bottom:8px;background:rgba(35,30,23,.72);color:#FFF8EC;font-size:11px;padding:3px 8px;border-radius:var(--r-pill);letter-spacing:.06em}
+.shot .del{position:absolute;right:8px;top:8px;width:28px;height:28px;border-radius:50%;background:rgba(255,252,247,.92);color:var(--ink-2);display:flex;align-items:center;justify-content:center;font-size:15px;line-height:1}
+.grid-foot{display:flex;justify-content:space-between;align-items:center;margin-top:10px;font-size:12.5px;color:var(--ink-2)}
+.grid-foot b{font-weight:600;color:var(--ink)}
+.link{color:var(--amber);font-weight:600}
+
+/* 区块标签与 chips */
+.block{margin-top:20px}
+.label{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:9px}
+.label b{font-size:15px;font-weight:600}
+.label span{font-size:11.5px;color:var(--ink-3)}
+.chips{display:flex;gap:8px;overflow-x:auto;padding:2px 16px 4px;margin:0 -16px}
+.chips::-webkit-scrollbar{display:none}
+.chip{flex:0 0 auto;height:44px;display:inline-flex;align-items:center;padding:0 16px;border-radius:var(--r-pill);border:1px solid var(--line-strong);background:var(--surface);color:var(--ink-2);font-size:14px;white-space:nowrap}
+.chip.on{background:var(--ink);border-color:var(--ink);color:#FFF8EC;font-weight:500}
+.chip.sm{height:40px;font-size:13.5px}
+
+/* 输入 */
+.input{margin-top:2px;min-height:52px;display:flex;align-items:center;padding:12px 14px;border-radius:var(--r-sm);border:1px solid var(--line-strong);background:var(--surface);font-size:14px;line-height:1.5}
+.input.ph{color:var(--ink-3)}
+.hint{display:flex;gap:8px;align-items:flex-start;margin-top:16px;padding:11px 13px;border-radius:var(--r-sm);background:var(--amber-soft);color:#7A4A0E;font-size:12.5px;line-height:1.5}
+.hint i{flex:0 0 auto;width:15px;height:15px;border-radius:50%;background:var(--amber);color:#FFF8EC;font-size:10px;font-style:normal;display:flex;align-items:center;justify-content:center;margin-top:2px}
+
+/* 底部主 CTA */
+.dock{margin-top:auto;position:sticky;bottom:0;background:linear-gradient(180deg,rgba(246,241,232,0) 0%,var(--bg) 26%);padding:18px 16px 22px}
+.cta{width:100%;height:56px;border:0;border-radius:var(--r-pill);background:var(--amber);color:#FFF9F0;font-family:inherit;font-size:17px;font-weight:600;letter-spacing:.02em;box-shadow:0 10px 20px -12px rgba(196,118,28,.9)}
+.cta-sub{margin-top:9px;text-align:center;font-size:11.5px;color:var(--ink-3)}
+
+/* 弱网横幅 */
+.banner{display:flex;gap:10px;align-items:flex-start;margin:2px 16px 0;padding:12px 13px;border-radius:var(--r-sm);background:var(--surface);border:1px solid var(--line-strong);box-shadow:var(--paper)}
+.banner .bd{flex:1;font-size:12.5px;line-height:1.55;color:var(--ink-2)}
+.banner .bd b{display:block;font-size:13px;color:var(--ink);font-weight:600;margin-bottom:2px}
+.banner .act{flex:0 0 auto;align-self:center;font-size:12.5px;font-weight:600;color:var(--amber);white-space:nowrap}
+
+/* 排名卡片 */
+.card{display:flex;gap:12px;padding:12px;margin:0 16px 12px;border-radius:var(--r-md);background:var(--surface);border:1px solid var(--line);box-shadow:var(--paper)}
+.card.top{border-color:var(--line-strong);box-shadow:var(--paper-lift)}
+.card .rk{flex:0 0 auto;width:26px;text-align:center}
+.card .rk b{display:block;font-size:20px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--ink-3);line-height:1.1}
+.card.top .rk b{color:var(--amber)}
+.card .thumb{flex:0 0 auto;width:62px;height:78px;border-radius:var(--r-sm);overflow:hidden;border:1px solid var(--line);background:var(--surface-2)}
+.card .thumb img{display:block;width:100%;height:100%;object-fit:cover}
+.card .body{flex:1;min-width:0}
+.card .top-line{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+.card .tag{font-size:10.5px;padding:2px 7px;border-radius:var(--r-pill);background:var(--amber-soft);color:#7A4A0E;font-weight:600;transform:rotate(-1.5deg)}
+.card .sc{font-size:30px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-.02em;line-height:1}
+.card .sc small{font-size:11px;font-weight:500;color:var(--ink-3);letter-spacing:0;margin-left:3px}
+.dims{display:grid;grid-template-columns:repeat(3,1fr);gap:8px 10px;margin-top:11px}
+.dim .dl{font-size:10.5px;color:var(--ink-3);display:block}
+.dim .dv{font-size:13px;font-weight:600;font-variant-numeric:tabular-nums;display:block;margin-top:1px;color:var(--ink-2)}
+.dim.hot .dv,.dim.hot .dl{color:var(--ink)}
+/* 软尺：每一维是一条 0–5 的刻度尺，读数落在指针上 */
+.dim .tr{position:relative;display:block;height:12px;margin-top:5px;border-bottom:1px solid var(--line-strong);
+  background-image:repeating-linear-gradient(90deg,var(--line-strong) 0 1px,transparent 1px 100%);
+  background-size:20% 6px;background-repeat:repeat-x;background-position:left bottom}
+.dim .tr u{display:block;height:100%;background:none;position:relative}
+.dim .tr u::after{content:"";position:absolute;right:-1px;bottom:0;width:2px;height:11px;background:var(--ink-2)}
+.dim.hot .tr u::after{background:var(--amber);height:14px}
+.card .deep{margin-top:11px;height:44px;display:inline-flex;align-items:center;gap:6px;padding:0 16px;border-radius:var(--r-pill);border:1px solid var(--line-strong);background:var(--surface);font-size:13.5px;font-weight:600;color:var(--ink)}
+.card .deep.ghost{color:var(--ink-2);border-style:dashed}
+
+/* 对比开关 */
+.switch-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:6px 16px 0;padding:14px;border-radius:var(--r-md);background:var(--surface);border:1px solid var(--line)}
+.switch-row .sl b{display:block;font-size:14px;font-weight:600}
+.switch-row .sl span{display:block;font-size:11.5px;color:var(--ink-3);margin-top:2px}
+.sw{flex:0 0 auto;width:50px;height:30px;border-radius:var(--r-pill);background:var(--ink);position:relative}
+.sw i{position:absolute;top:3px;right:3px;width:24px;height:24px;border-radius:50%;background:var(--surface)}
+.sw.off{background:var(--line-strong)}
+.sw.off i{right:auto;left:3px}
+
+/* 双系统同屏对比 */
+.cmp-head{display:flex;align-items:center;justify-content:space-between;padding:10px 16px 12px}
+.cmp-head b{font-size:17px;font-weight:600}
+.cmp{display:grid;grid-template-columns:1fr 1fr;gap:0;margin:0 16px;border:1px solid var(--line);border-radius:var(--r-md);overflow:hidden;background:var(--surface);box-shadow:var(--paper)}
+.pane{padding:12px 12px 14px;min-width:0}
+.pane+.pane{border-left:1px solid var(--line);background:var(--surface-2)}
+.ptag{display:inline-block;font-size:10.5px;font-weight:600;letter-spacing:.04em;padding:3px 8px;border-radius:var(--r-pill);background:var(--ink);color:#FFF8EC}
+.pane.two .ptag{background:var(--amber)}
+.pane .big{margin-top:10px;font-size:34px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-.02em;line-height:1}
+.pane .big small{display:block;font-size:11px;font-weight:500;color:var(--ink-3);margin-top:5px;letter-spacing:0}
+.plist{margin-top:12px;display:flex;flex-direction:column;gap:9px}
+.prow{display:flex;align-items:center;gap:8px}
+.prow .pl{flex:1;font-size:11.5px;color:var(--ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.prow .pv{font-size:12.5px;font-weight:700;font-variant-numeric:tabular-nums}
+.prow .pv.hot{color:var(--amber)}
+.stars{color:var(--amber);font-size:12px;letter-spacing:1px}
+.rankline{display:flex;gap:8px;align-items:center;padding-bottom:9px;border-bottom:1px dashed var(--line-strong)}
+.rankline:last-child{border-bottom:0;padding-bottom:0}
+.rankline .rt{flex:0 0 auto;width:30px;height:38px;border-radius:6px;overflow:hidden;border:1px solid var(--line);background:var(--surface)}
+.rankline .rt img{display:block;width:100%;height:100%;object-fit:cover}
+.rankline .rb{flex:1;min-width:0}
+.rankline .rb b{display:block;font-size:11.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rankline .rb span{display:block;font-size:10.5px;color:var(--ink-3);line-height:1.45;margin-top:2px}
+.note{margin-top:12px;padding:10px;border-radius:var(--r-sm);background:var(--amber-soft)}
+.note b{display:block;font-size:11.5px;font-weight:600;color:#7A4A0E}
+.note p{margin:4px 0 0;font-size:11px;line-height:1.55;color:#7A4A0E}
+.pane .caption{margin-top:12px;font-size:11px;color:var(--ink-3);line-height:1.5}
+.footnote{padding:14px 16px 26px;font-size:11px;line-height:1.6;color:var(--ink-3)}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ── 上传 · 首屏 ───────────────────────────────── -->
+  <section class="screen">
+    <div class="status"><span class="status-l">8:10</span><span class="status-r"><i></i><i></i><i></i></span></div>
+    <div class="tabs">
+      <span class="tab on">上传</span><span class="tab">结果</span><span class="tab">历史</span><span class="tab">设置</span>
+    </div>
+
+    <div class="head pad">
+      <h1>今天穿哪套？</h1>
+      <p>已选 <b>4 套</b> · 看看哪套最合适</p>
+    </div>
+
+    <div class="grid pad">
+      <figure class="shot"><img src="img/look1.jpg" alt="穿搭一"><span class="no">1</span><span class="del">×</span></figure>
+      <figure class="shot"><img src="img/look2.jpg" alt="穿搭二"><span class="no">2</span><span class="del">×</span></figure>
+      <figure class="shot"><img src="img/look3.jpg" alt="穿搭三"><span class="no">3</span><span class="del">×</span></figure>
+      <figure class="shot"><img src="img/look4.jpg" alt="穿搭四"><span class="no">4</span><span class="del">×</span></figure>
+    </div>
+    <div class="grid-foot pad"><span>最多 4 套，选满为止</span><span class="link">重新选择</span></div>
+
+    <div class="block">
+      <div class="label pad"><b>场合</b><span>可多选 · 已选 2</span></div>
+      <div class="chips">
+        <span class="chip on">通勤上班</span><span class="chip on">约会见面</span><span class="chip">闺蜜聚餐</span><span class="chip">正式面试</span><span class="chip">逛街出游</span><span class="chip">运动健身</span>
+      </div>
+    </div>
+
+    <div class="block">
+      <div class="label pad"><b>天气</b><span>可多选 · 已选 1</span></div>
+      <div class="chips">
+        <span class="chip">炎热</span><span class="chip on">凉爽</span><span class="chip">寒冷</span><span class="chip">雨天</span><span class="chip">大风</span>
+      </div>
+    </div>
+
+    <div class="block">
+      <div class="label pad"><b>风格偏好</b><span>可多选 · 已选 1</span></div>
+      <div class="chips">
+        <span class="chip on">简约干练</span><span class="chip">温柔甜美</span><span class="chip">酷飒休闲</span><span class="chip">知性优雅</span><span class="chip">元气少女</span>
+      </div>
+    </div>
+
+    <div class="block">
+      <div class="label pad"><b>再补一句</b><span>可不填</span></div>
+      <div class="pad"><div class="input">今天下午要见客户，晚上和朋友吃饭</div></div>
+    </div>
+
+    <div class="block">
+      <div class="label pad"><b>你想问什么</b><span>单选 · 也可自己写</span></div>
+      <div class="chips">
+        <span class="chip sm on">哪套最适合今天的场合？</span><span class="chip sm">哪套更显瘦？</span><span class="chip sm">哪套拍照更上镜？</span><span class="chip sm">这套会不会太随意？</span>
+      </div>
+      <div class="pad" style="margin-top:10px"><div class="input ph">也可以自己写一个问题…</div></div>
+    </div>
+
+    <div class="hint pad" style="margin:18px 16px 0"><i>i</i><span>4 套照片已就绪，选好场合和问题，就可以开始了。</span></div>
+
+    <div class="dock">
+      <button class="cta">开始快速评分</button>
+      <div class="cta-sub">只出分数，不出解释 · 约 10 秒</div>
+    </div>
+  </section>
+
+  <!-- ── 上传 · 下半屏（滚动后） ───────────────────── -->
+  <section class="screen clip">
+    <div style="margin-top:-660px">
+      <div class="head pad">
+        <h1>今天穿哪套？</h1>
+        <p>已选 <b>4 套</b> · 看看哪套最合适</p>
+      </div>
+      <div class="grid pad">
+        <figure class="shot"><img src="img/look1.jpg" alt="穿搭一"><span class="no">1</span><span class="del">×</span></figure>
+        <figure class="shot"><img src="img/look2.jpg" alt="穿搭二"><span class="no">2</span><span class="del">×</span></figure>
+        <figure class="shot"><img src="img/look3.jpg" alt="穿搭三"><span class="no">3</span><span class="del">×</span></figure>
+        <figure class="shot"><img src="img/look4.jpg" alt="穿搭四"><span class="no">4</span><span class="del">×</span></figure>
+      </div>
+      <div class="grid-foot pad"><span>最多 4 套，选满为止</span><span class="link">重新选择</span></div>
+
+      <div class="block">
+        <div class="label pad"><b>场合</b><span>可多选 · 已选 2</span></div>
+        <div class="chips"><span class="chip on">通勤上班</span><span class="chip on">约会见面</span><span class="chip">闺蜜聚餐</span><span class="chip">正式面试</span><span class="chip">逛街出游</span><span class="chip">运动健身</span></div>
+      </div>
+      <div class="block">
+        <div class="label pad"><b>天气</b><span>可多选 · 已选 1</span></div>
+        <div class="chips"><span class="chip">炎热</span><span class="chip on">凉爽</span><span class="chip">寒冷</span><span class="chip">雨天</span><span class="chip">大风</span></div>
+      </div>
+      <div class="block">
+        <div class="label pad"><b>风格偏好</b><span>可多选 · 已选 1</span></div>
+        <div class="chips"><span class="chip on">简约干练</span><span class="chip">温柔甜美</span><span class="chip">酷飒休闲</span><span class="chip">知性优雅</span><span class="chip">元气少女</span></div>
+      </div>
+      <div class="block">
+        <div class="label pad"><b>再补一句</b><span>可不填</span></div>
+        <div class="pad"><div class="input">今天下午要见客户，晚上和朋友吃饭</div></div>
+      </div>
+      <div class="block">
+        <div class="label pad"><b>你想问什么</b><span>单选 · 也可自己写</span></div>
+        <div class="chips"><span class="chip sm on">哪套最适合今天的场合？</span><span class="chip sm">哪套更显瘦？</span><span class="chip sm">哪套拍照更上镜？</span><span class="chip sm">这套会不会太随意？</span></div>
+        <div class="pad" style="margin-top:10px"><div class="input ph">也可以自己写一个问题…</div></div>
+      </div>
+      <div class="hint pad" style="margin:18px 16px 0"><i>i</i><span>4 套照片已就绪，选好场合和问题，就可以开始了。</span></div>
+      <div class="footnote">
+        照片只在本次分析中使用，不进历史、不落盘，关闭页面即释放。历史记录里只保留文字描述与分数。
+      </div>
+    </div>
+  </section>
+
+  <!-- ── 结果 ──────────────────────────────────────── -->
+  <section class="screen">
+    <div class="status"><span class="status-l">8:11</span><span class="status-r"><i></i><i></i><i></i></span></div>
+    <div class="tabs">
+      <span class="tab">上传</span><span class="tab on">结果</span><span class="tab">历史</span><span class="tab">设置</span>
+    </div>
+
+    <div class="head pad" style="padding-bottom:10px">
+      <h1>4 套排名</h1>
+      <p>按综合分从高到低 · 刚刚</p>
+    </div>
+
+    <div class="banner">
+      <div class="bd"><b>当前网络较慢</b>建议先用快速评分；深度分析可能要多等一会儿</div>
+      <div class="act">切到快速评分</div>
+    </div>
+
+    <div style="margin-top:14px"></div>
+
+    <article class="card top">
+      <div class="rk"><b>1</b></div>
+      <div class="thumb"><img src="img/look1.jpg" alt="第一套"></div>
+      <div class="body">
+        <div class="top-line"><span class="tag">今天穿这套</span><span class="sc">4.3<small>/5</small></span></div>
+        <div class="dims">
+          <div class="dim hot"><span class="dl">场合</span><b class="dv">4.2</b><span class="tr"><u style="width:84%"></u></span></div>
+          <div class="dim"><span class="dl">美观</span><b class="dv">4.5</b><span class="tr"><u style="width:90%"></u></span></div>
+          <div class="dim"><span class="dl">身材</span><b class="dv">4.0</b><span class="tr"><u style="width:80%"></u></span></div>
+          <div class="dim hot"><span class="dl">实用</span><b class="dv">3.8</b><span class="tr"><u style="width:76%"></u></span></div>
+          <div class="dim"><span class="dl">风格</span><b class="dv">4.6</b><span class="tr"><u style="width:92%"></u></span></div>
+          <div class="dim"><span class="dl">综合</span><b class="dv">4.3</b><span class="tr"><u style="width:86%"></u></span></div>
+        </div>
+        <button class="deep">深度分析</button>
+      </div>
+    </article>
+
+    <article class="card">
+      <div class="rk"><b>2</b></div>
+      <div class="thumb"><img src="img/look3.jpg" alt="第三套"></div>
+      <div class="body">
+        <div class="top-line"><span></span><span class="sc">3.9<small>/5</small></span></div>
+        <div class="dims">
+          <div class="dim hot"><span class="dl">场合</span><b class="dv">4.0</b><span class="tr"><u style="width:80%"></u></span></div>
+          <div class="dim"><span class="dl">美观</span><b class="dv">3.8</b><span class="tr"><u style="width:76%"></u></span></div>
+          <div class="dim"><span class="dl">身材</span><b class="dv">3.6</b><span class="tr"><u style="width:72%"></u></span></div>
+          <div class="dim hot"><span class="dl">实用</span><b class="dv">4.1</b><span class="tr"><u style="width:82%"></u></span></div>
+          <div class="dim"><span class="dl">风格</span><b class="dv">3.9</b><span class="tr"><u style="width:78%"></u></span></div>
+          <div class="dim"><span class="dl">综合</span><b class="dv">3.9</b><span class="tr"><u style="width:78%"></u></span></div>
+        </div>
+        <button class="deep">深度分析</button>
+      </div>
+    </article>
+
+    <article class="card">
+      <div class="rk"><b>3</b></div>
+      <div class="thumb"><img src="img/look2.jpg" alt="第二套"></div>
+      <div class="body">
+        <div class="top-line"><span></span><span class="sc">3.6<small>/5</small></span></div>
+        <div class="dims">
+          <div class="dim hot"><span class="dl">场合</span><b class="dv">3.7</b><span class="tr"><u style="width:74%"></u></span></div>
+          <div class="dim"><span class="dl">美观</span><b class="dv">3.4</b><span class="tr"><u style="width:68%"></u></span></div>
+          <div class="dim"><span class="dl">身材</span><b class="dv">3.3</b><span class="tr"><u style="width:66%"></u></span></div>
+          <div class="dim hot"><span class="dl">实用</span><b class="dv">3.9</b><span class="tr"><u style="width:78%"></u></span></div>
+          <div class="dim"><span class="dl">风格</span><b class="dv">3.5</b><span class="tr"><u style="width:70%"></u></span></div>
+          <div class="dim"><span class="dl">综合</span><b class="dv">3.6</b><span class="tr"><u style="width:72%"></u></span></div>
+        </div>
+        <button class="deep">深度分析</button>
+      </div>
+    </article>
+
+    <article class="card">
+      <div class="rk"><b>4</b></div>
+      <div class="thumb"><img src="img/look4.jpg" alt="第四套"></div>
+      <div class="body">
+        <div class="top-line"><span></span><span class="sc">3.2<small>/5</small></span></div>
+        <div class="dims">
+          <div class="dim hot"><span class="dl">场合</span><b class="dv">3.4</b><span class="tr"><u style="width:68%"></u></span></div>
+          <div class="dim"><span class="dl">美观</span><b class="dv">3.0</b><span class="tr"><u style="width:60%"></u></span></div>
+          <div class="dim"><span class="dl">身材</span><b class="dv">3.1</b><span class="tr"><u style="width:62%"></u></span></div>
+          <div class="dim hot"><span class="dl">实用</span><b class="dv">3.5</b><span class="tr"><u style="width:70%"></u></span></div>
+          <div class="dim"><span class="dl">风格</span><b class="dv">2.9</b><span class="tr"><u style="width:58%"></u></span></div>
+          <div class="dim"><span class="dl">综合</span><b class="dv">3.2</b><span class="tr"><u style="width:64%"></u></span></div>
+        </div>
+        <button class="deep ghost">这套没看清，重新试一次</button>
+      </div>
+    </article>
+
+    <div class="switch-row">
+      <div class="sl"><b>双系统同屏对比</b><span>左边看分数，右边看报告</span></div>
+      <div class="sw"><i></i></div>
+    </div>
+    <div class="footnote">分数只反映照片里看得见的东西，看不清的地方不会猜。</div>
+  </section>
+
+  <!-- ── 双系统同屏对比 ────────────────────────────── -->
+  <section class="screen">
+    <div class="status"><span class="status-l">8:12</span><span class="status-r"><i></i><i></i><i></i></span></div>
+    <div class="tabs">
+      <span class="tab">上传</span><span class="tab on">结果</span><span class="tab">历史</span><span class="tab">设置</span>
+    </div>
+    <div class="cmp-head">
+      <b>双系统同屏对比</b>
+      <div class="sw"><i></i></div>
+    </div>
+
+    <div class="cmp">
+      <div class="pane one">
+        <span class="ptag">快速评分</span>
+        <div class="big num">4.3<small>综合分 · 第 1 名</small></div>
+        <div class="plist">
+          <div class="prow"><span class="pl">场合</span><span class="pv hot num">4.2</span></div>
+          <div class="prow"><span class="pl">美观</span><span class="pv num">4.5</span></div>
+          <div class="prow"><span class="pl">身材</span><span class="pv num">4.0</span></div>
+          <div class="prow"><span class="pl">风格</span><span class="pv num">4.6</span></div>
+          <div class="prow"><span class="pl">实用</span><span class="pv hot num">3.8</span></div>
+        </div>
+        <div class="caption">排序只看综合分；高亮的两维是你问题最相关的。</div>
+        <div class="plist" style="margin-top:11px">
+          <div class="rankline"><span class="rt"><img src="img/look1.jpg" alt=""></span><span class="rb"><b>1 · 4.3</b><span>通勤稳定</span></span></div>
+          <div class="rankline"><span class="rt"><img src="img/look3.jpg" alt=""></span><span class="rb"><b>2 · 3.9</b><span>耐走</span></span></div>
+          <div class="rankline"><span class="rt"><img src="img/look2.jpg" alt=""></span><span class="rb"><b>3 · 3.6</b><span>偏休闲</span></span></div>
+        </div>
+      </div>
+      <div class="pane two">
+        <span class="ptag">深度分析</span>
+        <div class="plist" style="margin-top:12px">
+          <div class="rankline"><span class="rt"><img src="img/look1.jpg" alt=""></span><span class="rb"><b>第 1 套 · <span class="stars">★★★★★</span></b><span>颜色干净，见客户和吃饭都稳</span></span></div>
+          <div class="rankline"><span class="rt"><img src="img/look3.jpg" alt=""></span><span class="rb"><b>第 3 套 · <span class="stars">★★★★</span></b><span>舒服好走，但偏日常</span></span></div>
+        </div>
+        <div class="note"><b>选第 1 套</b><p>上半身干净利落，见客户不掉分；晚上吃饭也不显得用力过猛。</p></div>
+        <div class="caption">鞋子偏休闲，换成皮质乐福鞋会更稳。</div>
+      </div>
+    </div>
+    <div class="footnote">左栏是六维分数，右栏是带着理由的报告；两边评的是同一套照片。</div>
+  </section>
+
+</div>
+</body>
+</html>

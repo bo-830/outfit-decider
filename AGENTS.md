@@ -27,7 +27,7 @@ System Two 多模态深度推理报告（三段式中文报告）。技术栈 Ex
 ## 代码约定
 
 - `src/core/**`、`src/data/**` 是**纯逻辑/纯数据**，禁止 import react / react-native / expo，
-  这样才能用 `node --test tests/` 直接跑（无需 jest）。
+  这样才能用 `node --test "tests/**/*.test.js"` 直接跑（无需 jest）。
 - 唯一的测试缝（seam）是 SPEC 里冻结的纯函数签名 + `node:test`，UI 不做组件级测试。
 - 网络调用统一经 `src/engine/api.js`，`fetchImpl` 可注入；`tools/mock-jev-server.mjs` 是契约的对端。
 - 所有中文文案集中在 `src/data/copy.js`（引擎/异常文案）与各 screen 内联（界面文案）。
@@ -36,7 +36,7 @@ System Two 多模态深度推理报告（三段式中文报告）。技术栈 Ex
 
 ```
 cmd /c "npm install"
-node --test tests/                      # 纯逻辑单测
+node --test "tests/**/*.test.js"        # 纯逻辑单测（注意：node 24 下 `node --test tests/` 会失败，必须用 glob）
 node tools/mock-jev-server.mjs          # 契约对端（默认 0.0.0.0:8787）
 node tools/verify.mjs                   # 全链路验收：起 mock + expo export web + puppeteer 冒烟
 ```

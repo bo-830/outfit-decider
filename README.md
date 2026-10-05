@@ -1,0 +1,100 @@
+# 出门穿什么 · outfit-decider
+
+> 出门前站在衣柜前不知道穿哪套？上传 1–4 套穿搭照，**先拿快速分数**，再决定要不要**深度分析**。
+> 双引擎：System One 只出分（直觉级极快），System Two 出完整报告（多模态慢思考）。移动端优先。
+
+**技术栈**：Expo SDK 57 · React Native 0.86.3 · React 19.2 · 纯 JS（无 TS 构建步骤）
+**契约**：[`docs/SPEC.md`](docs/SPEC.md) 是唯一真源（协议 / 状态机 / 异常 / 隐私不变量 / 验收断言）
+**操作手册**：[`docs/RUNBOOK.md`](docs/RUNBOOK.md)（真机扫码、Laya 局域网部署、故障复现）
+**视觉规范**：[`docs/DESIGN.md`](docs/DESIGN.md)（设计令牌、对比度实测值、动效参数）
+
+---
+
+## 1. 它解决什么问题
+
+目标用户是**出门前有穿搭选择困难**的人。她真正要的不是"被分析"，而是**在 30 秒内定下来穿哪套**。所以：
+
+- **默认走快的**：提交后立刻跑 System One，只回结构化分数（6 个维度，0–5 分，1 位小数），**不吐任何解释文本**——手机上没人愿意读一大段再自己做决定。
+- **想深挖再深挖**：点「深度分析」才调多模态大模型，出三段式报告（综合排名 → 每套详细分析 → 整体建议），语气像靠谱闺蜜。
+- **两套结论可以对照**：「双系统同屏对比」把「快速评分」与「深度分析」并排摆出来。
+
+## 2. 双引擎怎么分工
+
+| | System One（快速评分） | System Two（深度分析） |
+|---|---|---|
+| 路径 | 图 → **结构化纯文字描述** → 决策模型打分 | 原图 + state + question **直接**进多模态大模型 |
+| 协议 | 严格 JEv/Laya 纯 JSON：`model` / `state` / `questions` → `model` / `answers` / `usage` | 同一通道，答案类型为 `text`，内容是 JSON 字符串 |
+| 输出 | **只有分数**：overall / aesthetic / scene / figure / style / practical，各带 `confidence` | 三段式中文报告：排名 + 每套 5 维评分/优点/不足/建议 + 整体结论与替代搭配 |
+| 速度 | 4 套并行（并发上限 4），单套失败不阻塞其余 | 一次调用全部套，慢但深 |
+| 语气约束 | 严格客观，**禁止**评价/建议类文本；描述看不清写「未清晰显示」 | 亲切接地气；只基于图片可见内容与用户给的信息，**不臆测**身材/职业 |
+
+两种引擎共用一套请求结构，因此**换引擎不用改代码**，只改设置页的模式与地址：
+
+- **JEv 云端模式** → 用户自配 baseUrl + API Key（`Authorization: Bearer`）
+- **Laya 本地模式** → 局域网内自己部署的决策模型，不带 Authorization
+
+## 3. 三分钟跑起来
+
+```powershell
+cd C:\博830\vibecoding\outfit-decider
+
+# ① 契约对端（假决策模型，监听 0.0.0.0:8787；真接自己的模型时不需要它）
+node tools/mock-jev-server.mjs
+
+# ② 纯逻辑单测 → 期望 tests 89 / pass 89 / fail 0
+node --test "tests/**/*.test.js"
+
+# ③ 全链路验收：起 mock → expo export web → headless Chrome 390×844 冒烟 → 截图 + 报告
+node tools/verify.mjs
+```
+
+> ⚠️ **必须**用 glob 形式。Node v24 下 `node --test tests/` 会报 `Cannot find module ...\tests`
+> （v24 把位置参数当测试文件执行，不再展开目录，与中文路径无关）。
+> Windows 上 `npm` 被安全策略拦住，请用 `cmd /c "npm install"`。
+
+**手机上看真机效果**：`cmd /c "npx expo start --lan"` → 手机 Expo Go 扫码（详见 [`docs/RUNBOOK.md`](docs/RUNBOOK.md#1-真机验收手机-expo-go-扫码推荐路径)）。
+
+## 4. 目录结构
+
+```
+src/core/      纯逻辑层（禁止 import react/react-native/expo，故可被 node 直接测）
+               protocol 协议构造与解析 · prompts 提示词与问题 · scoring 排序汇总
+               state 上下文与校验 · flow 唯一状态机（纯 reducer）
+src/engine/    api 双模式网络层（可注入 fetch）· vision 图→文 · scoreSystem System One
+               deepSystem System Two · orchestrator 编排（并发 / 弱网 / 部分失败）
+src/data/      options 枚举真源 · copy 全部中文文案
+src/screens/   上传 / 结果 / 对比 / 历史 / 设置 / 引导
+src/components/ 结果卡、刻度尺、星级、报告卡、横幅等
+src/store/     history 仅存文字与分数 · secureKey API Key 本地存储
+tests/         8 个测试文件 · 562 条断言 · 纯 node:test（无 jest）
+tools/         mock-jev-server 契约对端 · verify 验收门禁 · make-fixtures 夹具生成
+fixtures/      结构化描述与 deep 报告样例（黄金样例）
+docs/          SPEC（唯一真源）/ DESIGN / RUNBOOK
+```
+
+## 5. 验收状态
+
+| 门禁 | 命令 | 结果 |
+|---|---|---|
+| 纯逻辑单测 | `node --test "tests/**/*.test.js"` | **89 / 89 pass，0 fail**（562 条断言） |
+| 全链路验收 | `node tools/verify.mjs` | **exit 0，12 / 12 断言通过** |
+| 真机（Expo Go + 局域网） | `npx expo start --lan` | 见 RUNBOOK §1（需人工扫码） |
+
+`node tools/verify.mjs` 覆盖的 12 条断言（逐条对应 SPEC §7）：mock 可达 · System One 结构与 1 位小数 ·
+**System One 零解释文本** · 结果页降序与 probe 一致 · System Two 三段式齐全 · 同屏对比两个标签 ·
+零 console 错误（故障注入产生的网络日志单独计数、不隐藏）· **隐私（storage / probe / 报告三处无图片、无 Key 明文）** ·
+异常横幅（走**真实 UI 路径**：设置页填 `test-auth-fail` / `test-timeout`）· 历史仅文字与分数 · 截图产物 · 报告自检。
+
+## 6. 隐私边界（硬约束）
+
+1. **原图只进内存**，看完即弃；不写盘、不入库、不进历史。历史记录只有文字描述与分数。
+2. **API Key 只在你的设备上**：原生走系统钥匙串；web 端无安全存储可用，降级为本地明文并**在界面上明确提示**。
+   Key 不出现在代码、日志、验证报告、异常文案或调试探针里（有断言）。
+3. **不向第三方上报**：除你在设置页配置的 baseUrl 之外，App 不发任何出网请求（无埋点、无遥测）。
+4. Laya 本地模式的数据交互只发生在你的局域网内。
+
+## 7. mock 的诚实声明
+
+`tools/mock-jev-server.mjs` 是**测试替身**：分数由 `lookId + state + 维度` 哈希生成，**不代表任何真实穿搭评价**，
+也不会真的"看懂"照片（描述文案读自 `fixtures/descriptions/*.json`）。它的设计目标是包住 SPEC §1.3 的线格式、
+让维度分与综合分**自洽**、并提供可复现的故障注入。换个 state 分数就会变，这是设计如此。
