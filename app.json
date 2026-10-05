@@ -1,0 +1,43 @@
+{
+  "expo": {
+    "name": "出门穿什么",
+    "slug": "outfit-decider",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "scheme": "outfitdecider",
+    "ios": {
+      "bundleIdentifier": "com.outfitdecider.app",
+      "supportsTablet": false,
+      "infoPlist": {
+        "NSPhotoLibraryUsageDescription": "需要访问相册以选择你的穿搭照片进行分析（照片仅用于本次分析，不会保存原图）",
+        "NSCameraUsageDescription": "需要使用相机拍摄穿搭照片进行分析（照片仅用于本次分析，不会保存原图）",
+        "NSLocalNetworkUsageDescription": "需要访问局域网以连接你自己部署的 Laya 本地决策模型"
+      }
+    },
+    "android": {
+      "package": "com.outfitdecider.app",
+      "permissions": [
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.CAMERA"
+      ],
+      "usesCleartextTraffic": true
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "static"
+    },
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "允许 $(PRODUCT_NAME) 选择穿搭照片（仅用于本次分析，不保存原图）",
+          "cameraPermission": "允许 $(PRODUCT_NAME) 拍摄穿搭照片（仅用于本次分析，不保存原图）"
+        }
+      ],
+      "expo-secure-store"
+    ]
+  }
+}

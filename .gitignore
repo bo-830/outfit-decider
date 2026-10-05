@@ -1,0 +1,45 @@
+# 依赖
+node_modules/
+
+# Expo
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# 原生工程（本仓库不做 prebuild / APK，构建产物不入库）
+/ios
+/android
+*.jks
+*.keystore
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# 本地产物与证据（不入库）
+artifacts/
+notes/
+shots/
+
+# 本地私密配置（API Key / 本机端点，绝不入库）
+*.local.json
+.local/
+.env
+.env.local
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+*.orig.*
+.vscode/*
+!.vscode/extensions.json
+
+# 日志
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+*.log
+
+# TS
+*.tsbuildinfo
