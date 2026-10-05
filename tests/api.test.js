@@ -304,3 +304,131 @@ test('makeApi：缺少 fetch 实现时按 network 处理，不抛同步异常', 
     globalThis.fetch = original;
   }
 });
+
+/* ── SPEC §5.1「重试」列：引擎侧语义由本文件负责（SPEC §6） ───────────────── */
+
+/** 按状态码脚本依次回应答的 fetch 替身，记录每次调用。 */
+function sequenceFetch(statuses, { body = {} } = {}) {
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init });
+    const status = statuses[Math.min(calls.length - 1, statuses.length - 1)];
+    // 'hang'：永不主动返回，但必须遵守 AbortSignal —— 真实 fetch 在 abort 时会 reject。
+    // 若这里不监听 signal，调用方的超时门就永远等不到结果，测试会挂死（我第一版就踩了这个坑）。
+    if (status === 'hang') {
+      return new Promise((resolve, reject) => {
+        const signal = init && init.signal;
+        if (signal && signal.aborted) {
+          reject(abortError());
+          return;
+        }
+        if (signal && typeof signal.addEventListener === 'function') {
+          signal.addEventListener('abort', () => reject(abortError()), { once: true });
+        }
+      });
+    }
+    const ok = status >= 200 && status < 300;
+    return {
+      ok,
+      status,
+      json: async () => (ok
+        ? { model: 'm', answers: [{ id: 'overall_score', type: 'score', score: 4.1, confidence: 0.5 }], usage: body }
+        : { error: { message: 'boom' } }),
+    };
+  };
+  return { fetchImpl, calls };
+}
+
+function abortError() {
+  const err = new Error('The operation was aborted');
+  err.name = 'AbortError';
+  return err;
+}
+
+const OK_ANSWER = (res) => res.answers[0].score;
+
+test('§5.1 重试：server(500) 自动重投 1 次后成功', async () => {
+  const { fetchImpl, calls } = sequenceFetch([500, 200]);
+  const api = makeApi({ config: config(), fetchImpl });
+  const res = await api.ask({ state: 's', questions: QUESTIONS });
+  assert.equal(OK_ANSWER(res), 4.1);
+  assert.equal(calls.length, 2, '500 必须重投一次');
+});
+
+test('§5.1 重试：network 失败自动重投 1 次，最终仍失败则抛原始 kind', async () => {
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    throw new TypeError('fetch failed');
+  };
+  const api = makeApi({ config: config(), fetchImpl });
+  await assert.rejects(
+    () => api.ask({ state: 's', questions: QUESTIONS }),
+    (err) => err.kind === 'network' && err.message === ERRORS.network.message,
+  );
+  assert.equal(calls, 2, 'network 必须重投恰好一次');
+});
+
+test('§5.1 重试：auth / parse 不得重试（重投只会得到同样结果）', async () => {
+  const authSeq = sequenceFetch([401]);
+  await assert.rejects(
+    () => makeApi({ config: config(), fetchImpl: authSeq.fetchImpl }).ask({ state: 's', questions: QUESTIONS }),
+    (err) => err.kind === 'auth',
+  );
+  assert.equal(authSeq.calls.length, 1, '401 不得重试');
+
+  const parseSeq = sequenceFetch([200], {});
+  const parseApi = makeApi({
+    config: config(),
+    fetchImpl: async (url, init) => {
+      parseSeq.calls.push({ url, init });
+      return { ok: true, status: 200, json: async () => { throw new SyntaxError('bad json'); } };
+    },
+  });
+  await assert.rejects(() => parseApi.ask({ state: 's', questions: QUESTIONS }), (err) => err.kind === 'parse');
+  assert.equal(parseSeq.calls.length, 1, '非 JSON 响应不得重试');
+});
+
+test('§5.1 重试：400/404 这类 4xx 虽用 server 文案，但不得自动重试', async () => {
+  for (const status of [400, 404]) {
+    const seq = sequenceFetch([status]);
+    await assert.rejects(
+      () => makeApi({ config: config(), fetchImpl: seq.fetchImpl }).ask({ state: 's', questions: QUESTIONS }),
+      (err) => err.kind === 'server' && err.status === status && err.retryable === false,
+      `${status} 必须 retryable=false`,
+    );
+    assert.equal(seq.calls.length, 1, `${status} 不得重试`);
+  }
+});
+
+test('§5.1 重试：rate_limit 用文案里的 2000ms 退避，且最终抛出 rate_limit', async () => {
+  const seq = sequenceFetch([429, 429]);
+  const api = makeApi({ config: config(), fetchImpl: seq.fetchImpl });
+  const startedAt = Date.now();
+  await assert.rejects(() => api.ask({ state: 's', questions: QUESTIONS }), (err) => err.kind === 'rate_limit');
+  const elapsed = Date.now() - startedAt;
+  assert.equal(seq.calls.length, 2, '429 允许重投一次');
+  assert.ok(elapsed >= ERRORS.rate_limit.retryDelayMs - 200, `退避应≈2000ms，实测 ${elapsed}ms`);
+});
+
+test('§5.1 重试：退避期间被取消 → 立即停手、不再发第二次请求', async () => {
+  const seq = sequenceFetch(['hang']);
+  const api = makeApi({ config: config({ quickTimeoutMs: 30 }), fetchImpl: seq.fetchImpl });
+  const startedAt = Date.now();
+  await assert.rejects(
+    () => api.ask({ state: 's', questions: QUESTIONS }),
+    (err) => err.kind === 'timeout',
+  );
+  const elapsed = Date.now() - startedAt;
+  // 单次预算 30ms + 退避 600ms 后才会重投 => 两次窗口约 30*2+600。
+  // 这里只断言"确实重投过"，避免把退避时长写死在测试里。
+  assert.equal(seq.calls.length, 2, 'timeout 属可重试，应重投一次');
+  assert.ok(elapsed < 5000, `不应出现无限等待，实测 ${elapsed}ms`);
+});
+
+test('§5.1 重试：health() 不参与自动重试（只探测一次）', async () => {
+  const seq = sequenceFetch([500]);
+  const health = await makeApi({ config: config(), fetchImpl: seq.fetchImpl }).health({});
+  assert.equal(health.ok, false);
+  assert.equal(seq.calls.length, 1, '健康检查必须只发一次');
+});

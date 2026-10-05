@@ -6,7 +6,7 @@
 **技术栈**：Expo SDK 57 · React Native 0.86.3 · React 19.2 · 纯 JS（无 TS 构建步骤）
 **契约**：[`docs/SPEC.md`](docs/SPEC.md) 是唯一真源（协议 / 状态机 / 异常 / 隐私不变量 / 验收断言）
 **操作手册**：[`docs/RUNBOOK.md`](docs/RUNBOOK.md)（真机扫码、Laya 局域网部署、故障复现）
-**视觉规范**：[`docs/DESIGN.md`](docs/DESIGN.md)（设计令牌、对比度实测值、动效参数）
+**视觉规范**：[`docs/DESIGN.md`](docs/DESIGN.md)（设计令牌、11 组对比度实测值、动效参数）
 
 ---
 
@@ -76,14 +76,23 @@ docs/          SPEC（唯一真源）/ DESIGN / RUNBOOK
 
 | 门禁 | 命令 | 结果 |
 |---|---|---|
-| 纯逻辑单测 | `node --test "tests/**/*.test.js"` | **89 / 89 pass，0 fail**（562 条断言） |
-| 全链路验收 | `node tools/verify.mjs` | **exit 0，12 / 12 断言通过** |
+| 纯逻辑单测 | `node --test "tests/**/*.test.js"` | **96 / 96 pass，0 fail** |
+| 全链路验收 | `node tools/verify.mjs` | **exit 0，12 / 12 断言 + 2 / 2 附加门禁通过** |
+| mock 契约自检 | `node tools/mock-selfcheck.mjs` | **30 / 30 pass**（不需要浏览器） |
 | 真机（Expo Go + 局域网） | `npx expo start --lan` | 见 RUNBOOK §1（需人工扫码） |
 
-`node tools/verify.mjs` 覆盖的 12 条断言（逐条对应 SPEC §7）：mock 可达 · System One 结构与 1 位小数 ·
-**System One 零解释文本** · 结果页降序与 probe 一致 · System Two 三段式齐全 · 同屏对比两个标签 ·
-零 console 错误（故障注入产生的网络日志单独计数、不隐藏）· **隐私（storage / probe / 报告三处无图片、无 Key 明文）** ·
+`node tools/verify.mjs` 覆盖的 12 条断言（逐条对应 SPEC §7）：mock 可达（含 `contractSpec` 防冒充）· System One 结构与 1 位小数 ·
+**System One 零解释文本** · 结果页降序与 probe 一致 · System Two 三段式齐全 · 同屏对比（读容器自身文本，要求出现真实分数与理由）·
+零 console 错误（故障注入产生的网络日志单独计数、不隐藏）· **隐私（storage / probe / 报告三处无图片、无 Key 明文，`leakPoints=[]`）** ·
 异常横幅（走**真实 UI 路径**：设置页填 `test-auth-fail` / `test-timeout`）· 历史仅文字与分数 · 截图产物 · 报告自检。
+
+两条附加门禁（不通过即 exit 1，防的是产品级矛盾）：
+- **`engine-agreement`**：同一屏里 System One 的第 1 名必须 === 深度报告的 `conclusion.pick` === 深度排名第 1。
+  （这条是补出来的：早期版本左栏说「第 4 套第一」、右栏说「第 4 套最差、选第 2 套」，详见 `docs/RUNBOOK.md` 的说明。）
+- **`score-coherence`**：每套的综合分必须与它自己的 5 个维度分自洽（按 `lookId` 配对，与排名顺序无关）。
+
+**门禁能红**：做过 5 次缺陷注入（分数丢 1 位小数、描述里混入 `base64`、逆序返回排名、改文案、绕过 sanitizer 写图片字段），
+每次都让 `verify.mjs` 变红并 `exit 1`，回滚后恢复全绿。只会在顺境下变绿的门禁等于没有门禁。
 
 ## 6. 隐私边界（硬约束）
 
@@ -95,6 +104,18 @@ docs/          SPEC（唯一真源）/ DESIGN / RUNBOOK
 
 ## 7. mock 的诚实声明
 
-`tools/mock-jev-server.mjs` 是**测试替身**：分数由 `lookId + state + 维度` 哈希生成，**不代表任何真实穿搭评价**，
-也不会真的"看懂"照片（描述文案读自 `fixtures/descriptions/*.json`）。它的设计目标是包住 SPEC §1.3 的线格式、
-让维度分与综合分**自洽**、并提供可复现的故障注入。换个 state 分数就会变，这是设计如此。
+`tools/mock-jev-server.mjs` 是**测试替身**：分数由 `lookId + state` 的 FNV-1a 哈希按维度生成，**不代表任何真实穿搭评价**，
+也不会真的"看懂"照片（描述文案读自 `fixtures/descriptions/*.json`）。
+
+它的设计目标有三个，缺一个都会让门禁失去意义：
+1. **包住 SPEC §1.3 的线格式**：score 强制序列化成 1 位小数（`3.0` 而不是 `3`）。
+2. **分数自洽**：`overall_score` 由 5 个维度加权聚合而来（选了场合时 `scene_score` 权重最高），
+   所以不会出现「综合 5.0 / 美观 2.8」这种自相矛盾的展示。
+3. **两个引擎同源**：deep 报告的排名、星级、理由**全部由同一套确定性分数派生**，
+   因此深度分析的第 1 名恒等于 System One 的第 1 名。两个引擎用的是结构不同的 `state` 文本，
+   所以 mock 先把两种形状投影到同一个规范上下文再哈希——否则同一套会算出两个分数，结论必然打架。
+
+另外还有 6 种故障注入（401 / 5xx / 非 JSON / 超时 / 空内容 / 部分失败）用于驱动异常链路。
+
+换个 state 分数就会变，这是设计如此，不是 bug。**要接真实模型时，把 `tools/mock-jev-server.mjs` 当成参考实现读**：
+它演示了本契约要求的请求/响应形状与字段。

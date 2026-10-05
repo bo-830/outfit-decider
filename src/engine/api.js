@@ -128,7 +128,17 @@ export function makeApi({ config, fetchImpl = globalThis.fetch } = {}) {
       const ok = response && typeof response.ok === 'boolean'
         ? response.ok
         : Number.isFinite(status) && status >= 200 && status < 300;
-      if (!ok) throw apiError(statusKind(status), { status: Number.isFinite(status) ? status : 0 });
+      if (!ok) {
+        // SPEC §5.1 的 server 行专指 5xx。其余非 401/403/429 的 4xx（400 参数错、404 路径错…）
+        // 重投一次也只会得到同样结果，只会让用户多等，因此借用 server 文案但**禁止重试**。
+        const kind = statusKind(status);
+        const clientError = Number.isFinite(status) && status >= 400 && status < 500
+          && kind !== 'auth' && kind !== 'rate_limit';
+        throw apiError(kind, {
+          status: Number.isFinite(status) ? status : 0,
+          ...(clientError ? { retryable: false } : {}),
+        });
+      }
 
       let data;
       try {
@@ -232,6 +242,7 @@ function statusKind(status) {
   return 'server';
 }
 
+/** SPEC §5.1 的错误分类；`extra.retryable` 可用于按具体状态码收紧重试（如 400/404 不重试）。 */
 function apiError(kind, extra = {}) {
   return errorFor(kind, extra);
 }

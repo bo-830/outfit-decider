@@ -1206,6 +1206,23 @@ async function main() {
     });
   }
 
+  // 6c 附加门禁：双引擎结论必须同向
+  // 产品级矛盾（左栏「第 4 套第一」/ 右栏「第 4 套最差，选第 2 套」）若回归，这里立刻变红。
+  // mock 的 deep 排名由与 System One 同源的分派生，因此 quick#1 必须恒等于 deep.pick。
+  {
+    const quickTop = ranked[0]?.lookId ?? null;
+    const deepPick = state.deepReport?.conclusion?.pick ?? null;
+    const deepTop = state.deepReport?.ranking?.[0]?.lookId ?? null;
+    const ok = !!quickTop && !!deepPick && quickTop === deepPick && deepPick === deepTop;
+    report.evidence.engineAgreement = { quickTop, deepPick, deepTop, agree: ok };
+    report.extras.push({
+      id: 'engine-agreement',
+      gating: true,
+      ok,
+      detail: `quick#1=${quickTop} deep.pick=${deepPick} deep.ranking#1=${deepTop} agree=${ok}`,
+    });
+  }
+
   // 7 console/页面错误（§7.7：只算"我们自己的代码"；浏览器网络层日志单独记录）
   {
     report.consoleErrors = report.consoleErrorDetails.length;

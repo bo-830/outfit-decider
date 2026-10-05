@@ -3,8 +3,8 @@
 > 本文件是并行开发的**唯一契约**。任何实现前必须先读本文件；实现与本文件冲突时，以本文件的签名为准；
 > 需要改契约时由 Lead 改本文件并提交，不得各自改代码后不回写契约。
 
-版本：v1.3（v1 = Phase 0 冻结；v1.1 新增 §2.1 三个设置页 testID 锚点；v1.2 修正门禁命令形式，见 §7.0；
-v1.3 修正 §3.7：describe 必须带图） · 适用范围：`src/core/**`、`src/data/**`、`src/engine/**`、`src/store/**`、
+版本：v1.4（v1 = Phase 0 冻结；v1.1 新增 §2.1 三个设置页 testID 锚点；v1.2 修正门禁命令形式，见 §7.0；
+v1.3 修正 §3.7 describe 必须带图、§2.1 补 `ranked[].scores`；v1.4 §5.1 补齐自动重试口径与时间预期） · 适用范围：`src/core/**`、`src/data/**`、`src/engine/**`、`src/store/**`、
 `src/ui/theme.js`、`src/components/**`、`src/screens/**`、`App.jsx`、`tools/**`、`tests/**`
 
 ---
@@ -456,6 +456,15 @@ mock 服务据 `images` 长度与 `state` 文本决定"看"到几套。
 | `parse` | 响应非 JSON / 缺字段 / 校验失败 | 模型返回的内容看不懂，请重试一次 | 重试 | 否 |
 | `invalid_input` | 图片无有效穿搭内容（描述全空或全为「未清晰显示」） | **无法识别有效穿搭内容，请上传清晰的穿搭照片哦** | 换图 | 否 |
 | `cancelled` | AbortController 主动取消 | （不展示，静默） | — | 否 |
+
+**重试的实现口径（v1.4 补充，落地在 `src/engine/api.js`）**：
+- 自动重投 **1 次**，退避 600ms；`rate_limit` 用文案里的 `retryDelayMs`（2000ms）。重试可被调用方的 AbortSignal 立刻打断。
+- `auth` / `parse` / `invalid_input` / `cancelled` **绝不重试**；`health()` 也不重试（只探测一次）。
+- **4xx 收紧**：`server` 行的语义是 5xx。非 401/403/429 的 4xx（400 参数错、404 路径错…）沿用 server 文案，
+  但强制 `retryable=false` —— 重投只会得到同样结果，白白让用户多等。
+- **代价要如实告知用户**：单次预算是 quick 20s / deep 45s，加上一次重试意味着最坏情况约 2 倍。
+  因此界面上「约 10 秒」已标注为顺境估算并写明「网络不好会自动重试一次」；弱网横幅负责把用户导向快速评分。
+  这是「失败即重试」与「先给分数」之间的取舍：选择了前者（网络抖动下成功率更高），但必须把时间预期说清楚。
 
 ### 5.2 弱网（规范 4）
 首个 `describe` 请求耗时 > 6000ms，或连续 2 次 `timeout` → `{type:'SET_WEAK', flag:true}` →

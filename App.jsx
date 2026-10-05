@@ -11,6 +11,7 @@ import { buildScoreQuestions } from './src/core/prompts.js';
 import { rankLooks } from './src/core/scoring.js';
 import { stateSummary, validateInput } from './src/core/state.js';
 import { LOOK_IDS } from './src/data/options.js';
+import { invalidInputError } from './src/data/copy.js';
 import { classifyError, DEFAULT_CONFIG, makeApi, normalizeBaseUrl } from './src/engine/api.js';
 import { makeOrchestrator } from './src/engine/orchestrator.js';
 import { appendHistory, clearHistory, loadHistory, makeHistoryRecord, removeHistory } from './src/store/history.js';
@@ -435,10 +436,9 @@ export default function App() {
         if (artifact) artifacts.push(artifact);
       }
       if (!artifacts.length) {
-        dispatch({
-          type: 'SET_ERROR',
-          error: { kind: 'invalid_input', message: '照片读不出来，换几张再试试', action: '换图', retryable: false },
-        });
+        // 选图/读取失败：动作是「换图」，与 invalid_input 一致。
+        // 文案必须来自 copy.js（AGENTS.md 代码约定），不得手写。
+        dispatch({ type: 'SET_ERROR', error: invalidInputError() });
         return;
       }
 
@@ -446,10 +446,7 @@ export default function App() {
       setExpandedLookId(null);
       dispatch({ type: 'SET_ARTIFACTS', artifacts });
     } catch {
-      dispatch({
-        type: 'SET_ERROR',
-        error: { kind: 'invalid_input', message: '照片读不出来，换几张再试试', action: '换图', retryable: false },
-      });
+      dispatch({ type: 'SET_ERROR', error: invalidInputError() });
     } finally {
       setPickBusy(false);
     }

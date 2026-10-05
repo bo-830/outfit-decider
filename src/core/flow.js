@@ -72,9 +72,12 @@ export function flowReducer(state, action) {
       const userState = current.userState && typeof current.userState === 'object'
         ? current.userState
         : emptyUserState();
-      // SPEC §1.1：note「trim 后长度 ≤ 200」——先 trim 再截断，避免尾部空白占满配额。
+      // SPEC §1.1「trim 后长度 ≤ 200」：先按字符上限截断（防超长），**不在这里 trim**。
+      // 原因：输入框是受控 multiline，逐键 dispatch SET_NOTE，若在此 trim 则用户永远打不出
+      // 空格/换行（尾随空白被实时吃掉）。真正的 trim 发生在消费端（buildSyntheticStateText /
+      // validateInput / 发送前的 stateSummary），那里按「trim 后长度」校验。
       const note = typeof action.note === 'string'
-        ? action.note.trim().slice(0, NOTE_MAX_LENGTH)
+        ? action.note.slice(0, NOTE_MAX_LENGTH)
         : '';
       return { ...current, userState: { ...userState, note } };
     }

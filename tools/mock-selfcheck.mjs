@@ -51,9 +51,15 @@ const stateFor = (n) => {
   const cn = ['一', '二', '三', '四'];
   const parts = [];
   for (let i = 0; i < n; i++) parts.push(`【穿搭${cn[i]}】\n整体风格：测试用描述${i + 1}`);
-  parts.push('【我的场合】通勤上班', '【我的问题】哪套最适合今天的场合？');
+  // 与 §3.2 一致：三组上下文都要给全，才能和 deep 模板的「我的上下文」投影出同一个规范串
+  parts.push('【我的场合】通勤上班', '【我的天气】凉爽', '【我的风格偏好】简约干练');
+  parts.push('【我的问题】哪套最适合今天的场合？');
   return parts.join('\n\n');
 };
+
+/** deep 请求的 state 形状（DEEP_USER_TEMPLATE 填好后的样子） */
+const DEEP_STATE =
+  '我的上下文：通勤上班 · 凉爽 · 简约干练\n\n我的问题：哪套最适合今天的场合？\n\n请按系统指令要求的 JSON 结构输出报告。';
 
 function isScoreStrict(a) {
   if (typeof a.score !== 'number' || a.score < 0 || a.score > 5) return false;
@@ -179,6 +185,44 @@ async function main() {
     report2 = JSON.parse(dj2.json?.answers?.[0]?.content ?? '');
   } catch { /* ignore */ }
   check(report2?.ranking?.length === 2 && report2?.details?.length === 2, 'deep_report with 2 looks -> length 2');
+
+  // 8b. 双引擎同向：deep.pick 必须 == System One 综合分第一名
+  //    （deep 请求与 score 请求的 state 形状不同，这里同时验证规范上下文投影让两者同分）
+  {
+    const CN_LABELS = ['一', '二', '三', '四'];
+    const quick = [];
+    for (let i = 0; i < LOOKS.length; i++) {
+      const per = await post(
+        { model: 'outfit-judge-v1', state: stateFor(1).replace('【穿搭一】', `【穿搭${CN_LABELS[i]}】`), questions: sq },
+        200,
+      );
+      quick.push({ lookId: LOOKS[i], overall: per.json?.answers?.find((a) => a.id === 'overall_score')?.score });
+    }
+    const deepResp = await post(
+      { model: 'outfit-judge-v1', state: DEEP_STATE, questions: [{ id: 'deep_report', type: 'text', question: '报告' }], images },
+      200,
+    );
+    let dr = null;
+    try {
+      dr = JSON.parse(deepResp.json?.answers?.[0]?.content ?? '');
+    } catch {
+      /* ignore */
+    }
+    const top = [...quick].sort((a, b) => b.overall - a.overall || LOOKS.indexOf(a.lookId) - LOOKS.indexOf(b.lookId))[0];
+    check(
+      !!dr && dr.conclusion?.pick === top.lookId && dr.ranking?.[0]?.lookId === top.lookId,
+      'engine agreement: deep.pick == System One rank #1',
+      `quick#1=${top.lookId}(${top.overall}) deep.pick=${dr?.conclusion?.pick} deep#1=${dr?.ranking?.[0]?.lookId}`,
+    );
+    check(
+      (dr?.ranking ?? []).every((r, i, arr) => i === 0 || arr[i - 1].stars >= r.stars),
+      'deep ranking stars monotone non-increasing (no direction contradiction)',
+    );
+    check(
+      JSON.stringify((dr?.ranking ?? []).map((r) => r.lookId)) === JSON.stringify((dr?.details ?? []).map((d) => d.lookId)),
+      'deep details order follows ranking',
+    );
+  }
 
   // 9. 故障注入
   const fa = await post({ model: 'test-auth-fail', state: stateFor(1), questions: sq }, 401);

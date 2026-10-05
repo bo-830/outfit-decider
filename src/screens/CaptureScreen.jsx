@@ -107,7 +107,7 @@ export default function CaptureScreen({
         <PrimaryButton
           testID="submit-quick"
           label={running ? '正在评分…' : '开始快速评分'}
-          sub="只出分数，不出解释 · 约 10 秒"
+          sub="只出分数，不出解释 · 约 10 秒（网络不好会自动重试一次）"
           onPress={onSubmit}
           disabled={!canRun}
           loading={running}

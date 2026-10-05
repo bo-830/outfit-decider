@@ -119,21 +119,72 @@ const WEIGHTS_NO_OCCASION = {
   practical_score: 0.12,
 };
 
-/** state 里是否给出了非空的【我的场合】行（§3.2：空组会被省略） */
-export function hasOccasion(state) {
-  const m = /【我的场合】([^\n]*)/.exec(state || '');
-  return !!(m && m[1].trim());
+/* ------------------------------------------- 规范上下文（两套引擎同源的关键）
+ *
+ * System One 的 score 请求与 System Two 的 deep 请求**state 文本形状不同**：
+ *   score: 【穿搭一】\n整体风格：…\n\n【我的场合】通勤上班\n【我的天气】凉爽\n【我的风格偏好】简约干练\n\n【我的问题】…
+ *   deep : 我的上下文：通勤上班 · 凉爽 · 简约干练\n\n我的问题：…\n\n请按系统指令要求的 JSON 结构输出报告。
+ * 若直接拿 state 原文当种子，两个引擎会对同一套算出**不同的分数**，同一屏上就会出现
+ * 「左边说第 4 套第一、右边说第 4 套最差」这种产品级矛盾。
+ * 这里把两种形状投影成同一个 canonicalContext（枚举文案唯一，见 SPEC §1.2），
+ * 保证 System One 与 System Two 在同一用户上下文下算出完全相同的分与排名。
+ */
+
+const OCCASION_LABELS = ['通勤上班', '约会见面', '闺蜜聚餐', '正式面试', '逛街出游', '运动健身'];
+const WEATHER_LABELS = ['炎热', '凉爽', '寒冷', '雨天', '大风'];
+const STYLE_LABELS = ['简约干练', '温柔甜美', '酷飒休闲', '知性优雅', '元气少女'];
+
+function firstMatch(text, re) {
+  const m = re.exec(text);
+  return m ? m[1].trim() : '';
 }
 
-/** 5 个维度分（确定性） */
+/** 把任意一种 state 文本投影成 `场合|天气|风格|问题` 规范串（两种模板结果一致） */
+export function canonicalContext(state) {
+  const s = String(state || '');
+  let occasion = firstMatch(s, /【我的场合】([^\n【]*)/);
+  let weather = firstMatch(s, /【我的天气】([^\n【]*)/);
+  let style = firstMatch(s, /【我的风格偏好】([^\n【]*)/);
+  let question = firstMatch(s, /【我的问题】([^\n【]*)/);
+
+  // deep 模板形状：'我的上下文：通勤上班 · 凉爽 · 简约干练'（空组会被 stateSummary 省略，
+  // 所以按枚举文案归类 token，而不是按下标猜）
+  if (!occasion && !weather && !style) {
+    const ctx = firstMatch(s, /我的上下文：([^\n]*)/);
+    for (const token of ctx.split('·').map((t) => t.trim()).filter(Boolean)) {
+      if (!occasion && OCCASION_LABELS.includes(token)) occasion = token;
+      else if (!weather && WEATHER_LABELS.includes(token)) weather = token;
+      else if (!style && STYLE_LABELS.includes(token)) style = token;
+    }
+  }
+  if (!question) question = firstMatch(s, /我的问题：([^\n]*)/);
+
+  const norm = (v) => (v && v !== '未指定' ? v.replace(/[、,]/g, '+') : '');
+  return {
+    occasion: norm(occasion),
+    weather: norm(weather),
+    style: norm(style),
+    question: norm(question),
+    key: `${norm(occasion)}|${norm(weather)}|${norm(style)}|${norm(question)}`,
+  };
+}
+
+/** state 里是否给出了非空场合（两种模板都认） */
+export function hasOccasion(state) {
+  return canonicalContext(state).occasion !== '';
+}
+
+/** 5 个维度分（确定性，且与 System Two 同源） */
 export function dimensionScoresFor(lookId, state) {
+  const basis = canonicalContext(state).key;
   const out = {};
-  for (const dim of SCORE_DIMENSION_IDS) out[dim] = deterministicScore(`${lookId}|${state}|${dim}`);
+  for (const dim of SCORE_DIMENSION_IDS) out[dim] = deterministicScore(`${lookId}|${basis}|${dim}`);
   return out;
 }
 
 /** overall = 加权平均(5 维) + 确定性小偏移，钳到 [2,5] 并保留 1 位小数 */
 export function composeOverallScore(lookId, state, dims) {
+  const basis = canonicalContext(state).key;
   const w = hasOccasion(state) ? WEIGHTS_WITH_OCCASION : WEIGHTS_NO_OCCASION;
   let acc = 0;
   let wsum = 0;
@@ -142,7 +193,7 @@ export function composeOverallScore(lookId, state, dims) {
     wsum += w[dim];
   }
   const weightedMean = acc / wsum;
-  const offset = ((fnv1a(`${lookId}|${state}|overall_score`) % 41) - 20) / 100; // -0.20 .. +0.20
+  const offset = ((fnv1a(`${lookId}|${basis}|overall_score`) % 41) - 20) / 100; // -0.20 .. +0.20
   const v = Math.min(5, Math.max(2, weightedMean + offset));
   return Math.round(v * 10) / 10;
 }
@@ -258,51 +309,91 @@ export function descriptionFor(lookId) {
 
 /* --------------------------------------------------- 深度报告（§3.9） */
 
-const DEEP_DIM_NAMES = ['场合适配度', '美观度', '身材友好度', '风格统一度', '实用舒适度'];
-
-function normalizeStars(n, fallback) {
-  const v = typeof n === 'number' && Number.isFinite(n) ? n : fallback;
-  const clamped = Math.max(0, Math.min(5, Math.round(v * 2) / 2));
-  return clamped;
-}
-
-function normalizeDetail(raw, lookId) {
-  const dims = Array.isArray(raw?.dimensions) ? raw.dimensions : [];
-  const byName = new Map(dims.map((d) => [String(d?.name ?? ''), d?.stars]));
-  const dimensions = DEEP_DIM_NAMES.map((name, i) => ({
-    name,
-    stars: normalizeStars(byName.get(name), [4, 4, 4, 4, 4][i]),
-  }));
-  const pros = (Array.isArray(raw?.pros) ? raw.pros : []).filter((s) => typeof s === 'string' && s.trim());
-  const cons = (Array.isArray(raw?.cons) ? raw.cons : []).filter((s) => typeof s === 'string' && s.trim());
-  const suggestions = (Array.isArray(raw?.suggestions) ? raw.suggestions : []).filter(
-    (s) => typeof s === 'string' && s.trim(),
-  );
-  while (pros.length < 2) pros.push('与用户提供的场合基本匹配');
-  while (cons.length < 1) cons.push('整体没有明显问题，细节还能再打磨');
-  while (suggestions.length < 1) suggestions.push('保持现在的搭配即可');
-  return {
-    lookId,
-    dimensions,
-    pros: pros.slice(0, 3),
-    cons: cons.slice(0, 2),
-    suggestions: suggestions.slice(0, 3),
-  };
-}
-
 function fallbackDeepFor(sortedIds) {
   const four = ['look1', 'look2', 'look3', 'look4'];
   const isFour = sortedIds.length === 4 && four.every((id) => sortedIds.includes(id));
   return isFour ? FALLBACK_DEEP_4 : FALLBACK_DEEP_2;
 }
 
-/**
- * 构造与请求 lookIds 严格对齐的深度报告：
- * ranking 长度 === lookIds 长度且按 stars 降序；details 顺序与 ranking 一致；pick ∈ lookIds。
- * 优先读 fixtures/deep/report-{n}looks.json（t-A 写入），失败回退内置。
+/* ------------------------------------------------- 深度报告（§3.9，分数派生）
+ *
+ * 产品级要求：System One 与 System Two 在**同一用户上下文**下必须给出同向结论。
+ * 因此 deep 报告的排名不再照搬静态 fixture（那会导致"左栏说第 4 套第一、
+ * 右栏说第 4 套最差"），而是：
+ *   1. 用与 System One **完全相同的种子与聚合公式**算出每套的 5 维分与 overall；
+ *   2. ranking 顺序 = overall 降序、同分 lookId 升序（与 §3.3 逐字一致），
+ *      所以 deep 的第一名恒等于 System One 的第一名；
+ *   3. stars 由 overall 在本次集合内的相对位置**单调**映射到 2.5–4.5（0.5 步进）；
+ *   4. oneLineReason 由该套**真实最强/最弱维度**生成，不会出现"给它低分却夸它"；
+ *   5. details 顺序跟随 ranking，5 个维度名与顺序恒定（§3.9 schema 不破）。
+ * fixtures/deep/*.json 仍作为**文案片段来源**（pros/cons/suggestions 的具体措辞），
+ * 但只在该片段不与派生强弱冲突时采用；缺文件时用内置兜底文案。
  */
-export function buildDeepReport(lookIds) {
+
+const DEEP_DIM_ORDER = [
+  ['场合适配度', 'scene_score'],
+  ['美观度', 'aesthetic_score'],
+  ['身材友好度', 'figure_score'],
+  ['风格统一度', 'style_score'],
+  ['实用舒适度', 'practical_score'],
+];
+const DIM_LABEL = Object.fromEntries(DEEP_DIM_ORDER.map(([name, key]) => [key, name]));
+
+/** 贴到 0.5 步进并钳到 [0,5] */
+function clampHalf(v) {
+  return Math.max(0, Math.min(5, Math.round(v * 2) / 2));
+}
+
+function detailOf(baseDetails, lookId) {
+  return baseDetails.find((d) => d?.lookId === lookId) ?? null;
+}
+
+const SCENE_WORDS =
+  /场合|正式|面试|通勤|约会|聚餐|出游|健身|餐厅|客户|随意|上班|会议|商务|礼服|见人|社交/;
+
+export function buildDeepReport(lookIds, state = '') {
   const wanted = lookIds.length ? [...lookIds] : ['look1', 'look2'];
+
+  // 1) 与 System One 同源：同样的种子基准、同样的聚合公式
+  const scored = wanted.map((lookId) => {
+    const dims = dimensionScoresFor(lookId, state);
+    return { lookId, dims, overall: composeOverallScore(lookId, state, dims) };
+  });
+
+  // 2) 排序规则与 §3.3 一致 → 与 System One 的第一名必然相同
+  scored.sort((a, b) => b.overall - a.overall || LOOK_IDS.indexOf(a.lookId) - LOOK_IDS.indexOf(b.lookId));
+
+  // 3) stars：按 overall 相对位置单调映射（2.5..4.5，0.5 步进）
+  const overalls = scored.map((r) => r.overall);
+  const lo = Math.min(...overalls);
+  const hi = Math.max(...overalls);
+  const starsFor = (o) => (hi === lo ? 4 : clampHalf(2.5 + 2 * ((o - lo) / (hi - lo))));
+
+  const occasion = hasOccasion(state);
+
+  // 4) 由真实维度强弱生成一句话理由
+  const reasonFor = (row, isPick) => {
+    const entries = SCORE_DIMENSION_IDS.map((d) => ({ d, v: row.dims[d], label: DIM_LABEL[d] }));
+    const best = entries.reduce((a, b) => (b.v > a.v ? b : a));
+    const worst = entries.reduce((a, b) => (b.v < a.v ? b : a));
+    const scene = row.dims.scene_score;
+    if (isPick) {
+      const fit = occasion
+        ? scene >= 4
+          ? '，和今天的场合最合拍'
+          : scene <= 3.2
+            ? '，场合上不算最抢眼，但整体平衡度最好'
+            : '，各方面都不拖后腿'
+        : '，配色与轮廓最协调';
+      return `${best.label}最突出（${best.v.toFixed(1)} 分）${fit}。`;
+    }
+    if (occasion && scene <= 3.2) {
+      return `${best.label}不错（${best.v.toFixed(1)} 分），但正式度偏弱（场合 ${scene.toFixed(1)} 分），今天的场合不太占优。`;
+    }
+    return `${best.label}不错（${best.v.toFixed(1)} 分），但${worst.label}偏弱（${worst.v.toFixed(1)} 分）。`;
+  };
+
+  // 5) 文案片段：优先 fixture，且丢弃与派生强弱冲突的场合类 caveat
   let base = readJsonFile(path.join(DEEP_DIR, `report-${wanted.length}looks.json`));
   if (base && !base.ranking) base = base.report ?? base.deep ?? base.data ?? null;
   if (!base) {
@@ -315,52 +406,74 @@ export function buildDeepReport(lookIds) {
     }
   }
   if (!base) base = fallbackDeepFor(wanted);
-
-  const baseRanking = Array.isArray(base?.ranking) ? base.ranking : [];
   const baseDetails = Array.isArray(base?.details) ? base.details : [];
 
-  const scoreOf = (id) => {
-    const row = baseRanking.find((r) => r?.lookId === id);
+  const ranking = scored.map((row, i) => ({
+    lookId: row.lookId,
+    // SPEC §3.9：ranking 行的理由字段名恒为 oneLineReason
+    stars: starsFor(row.overall),
+    oneLineReason: reasonFor(row, i === 0),
+  }));
+
+  const details = scored.map((row) => {
+    const raw = detailOf(baseDetails, row.lookId);
+    const entries = SCORE_DIMENSION_IDS.map((d) => ({ d, v: row.dims[d], label: DIM_LABEL[d] }));
+    const best = entries.reduce((a, b) => (b.v > a.v ? b : a));
+    const worst = entries.reduce((a, b) => (b.v < a.v ? b : a));
+
+    let pros = (Array.isArray(raw?.pros) ? raw.pros : []).filter((s) => typeof s === 'string' && s.trim());
+    let cons = (Array.isArray(raw?.cons) ? raw.cons : []).filter((s) => typeof s === 'string' && s.trim());
+    let suggestions = (Array.isArray(raw?.suggestions) ? raw.suggestions : []).filter(
+      (s) => typeof s === 'string' && s.trim(),
+    );
+    // 与派生分冲突的场合类文本直接丢弃（避免"第一名旁边写正式场合不合适"）
+    if (row.dims.scene_score >= 4) {
+      cons = cons.filter((s) => !SCENE_WORDS.test(s));
+      suggestions = suggestions.filter((s) => !SCENE_WORDS.test(s));
+    }
+    // 不足则用维度事实补齐，保证 §3.9 的条数下限
+    while (pros.length < 2) {
+      pros.push(
+        pros.length === 0
+          ? `${best.label}是这套最强的一项（${best.v.toFixed(1)} 分）`
+          : `${entries[1].label}也有 ${entries[1].v.toFixed(1)} 分，整体不塌`,
+      );
+    }
+    while (cons.length < 1) cons.push(`${worst.label}只有 ${worst.v.toFixed(1)} 分，是这套最弱的一环`);
+    while (suggestions.length < 1) suggestions.push(`优先补强${worst.label}，换一件更贴合的单品整体会更稳`);
+
     return {
-      stars: normalizeStars(row?.stars, 3.5),
-      // SPEC §3.9：ranking 行的理由字段名恒为 oneLineReason
-      oneLineReason:
-        (typeof row?.oneLineReason === 'string' && row.oneLineReason.trim()) ||
-        '这套与你的场合和偏好基本吻合，可以作为备选。',
+      lookId: row.lookId,
+      dimensions: DEEP_DIM_ORDER.map(([name, key]) => ({ name, stars: clampHalf(row.dims[key]) })),
+      pros: pros.slice(0, 3),
+      cons: cons.slice(0, 2),
+      suggestions: suggestions.slice(0, 3),
     };
-  };
-
-  const ranking = wanted
-    .map((lookId) => ({ lookId, ...scoreOf(lookId) }))
-    .sort((a, b) => b.stars - a.stars || LOOK_IDS.indexOf(a.lookId) - LOOK_IDS.indexOf(b.lookId));
-
-  const details = ranking.map((row) => {
-    const raw = baseDetails.find((d) => d?.lookId === row.lookId);
-    return normalizeDetail(raw, row.lookId);
   });
 
-  const baseConclusion = base?.conclusion ?? {};
-  const pick = wanted.includes(baseConclusion.pick) ? baseConclusion.pick : ranking[0].lookId;
-  const alternatives = (Array.isArray(baseConclusion.alternatives) ? baseConclusion.alternatives : [])
-    .filter((s) => typeof s === 'string' && s.trim())
-    .slice(0, 2);
-  const others = ranking.filter((r) => r.lookId !== pick).map((r) => r.lookId);
-  if (!alternatives.length && others.length) {
-    alternatives.push(`想换个感觉可以试 ${others[0]}`);
-  }
+  // 6) conclusion.pick 恒等于 ranking 第一名（= System One 第一名）
+  const pick = ranking[0].lookId;
+  const pickRow = scored[0];
+  const pickEntries = SCORE_DIMENSION_IDS.map((d) => ({ d, v: pickRow.dims[d], label: DIM_LABEL[d] }));
+  const pickWorst = pickEntries.reduce((a, b) => (b.v < a.v ? b : a));
+  const pickBest = pickEntries.reduce((a, b) => (b.v > a.v ? b : a));
+  // 用户可见文案用「第 N 套」，不要露出 lookN 这种内部 id
+  const cnLabel = (id) => `第 ${LOOK_IDS.indexOf(id) + 1} 套`;
+  const others = ranking.slice(1, 3).map((r) => r.lookId);
+  const alternatives = others.map(
+    (id) => `想换个感觉可以看 ${cnLabel(id)}（深度评分 ${ranking.find((r) => r.lookId === id).stars} 星）`,
+  );
 
   return {
     ranking,
     details,
     conclusion: {
       pick,
-      reason:
-        (typeof baseConclusion.reason === 'string' && baseConclusion.reason.trim()) ||
-        '综合场合、比例与风格统一度，这套是本次最稳的选择。',
+      reason: occasion
+        ? `四套里${cnLabel(pick)}的综合分最高（${pickRow.overall.toFixed(1)} 分），${pickBest.label}最突出（${pickBest.v.toFixed(1)} 分），和今天的场合方向一致。`
+        : `四套里${cnLabel(pick)}的综合分最高（${pickRow.overall.toFixed(1)} 分），${pickBest.label}最突出（${pickBest.v.toFixed(1)} 分），整体最协调。`,
       alternatives: alternatives.length ? alternatives : ['其余几套也都能穿，只是适配面窄一些'],
-      tip:
-        (typeof baseConclusion.tip === 'string' && baseConclusion.tip.trim()) ||
-        '出门前把容易起皱的位置顺一下，整体会更精神。',
+      tip: `出发前优先处理${pickWorst.label}这一项（本次 ${pickWorst.v.toFixed(1)} 分），调整最小、收益最明显。`,
     },
   };
 }
@@ -419,7 +532,8 @@ function buildDescribeAnswer(q, ctx) {
 
 function buildDeepAnswer(q, ctx) {
   const lookIds = resolveLookIds(ctx);
-  const report = buildDeepReport(lookIds);
+  // 分数派生：mock 的 deep 排名与 System One 同源，保证两个引擎同向
+  const report = buildDeepReport(lookIds, ctx.state ?? '');
   return {
     id: q.id,
     type: 'text',

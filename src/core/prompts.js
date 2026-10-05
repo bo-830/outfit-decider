@@ -265,11 +265,17 @@ export function parseDescriptionFields(text) {
   const out = {};
   if (typeof text !== 'string') return out;
   for (const dimension of DESCRIPTION_DIMENSIONS) {
+    // 边界 = 换行 或 「另一个维度名 + 冒号」。注意 `(?:…)\\s*[:：]` 的分组是必需的：
+    // 若写成 `(?:A|B)\\s*[:：]` 之外的 `A|B\\s*[:：]`，冒号只会绑定到最后一个备选，
+    // 于是「上衣：衬衫，下装是牛仔裤」会被错误截断成「衬衫，」。
     const others = DESCRIPTION_DIMENSIONS.filter((item) => item !== dimension);
-    const boundary = others.length ? `|(?=${others.join('|')}\\s*[:：])` : '';
+    const boundary = others.length
+      ? `|(?=(?:${others.join('|')})\\s*[:：])`
+      : '';
     const pattern = new RegExp(`${dimension}\\s*[:：]\\s*([^\\n]*?)(?=\\n${boundary}|$)`, 's');
     const match = text.match(pattern);
     const value = match && match[1] ? match[1].trim() : '';
+    // 值末尾残留的分隔符属于「维度之间」的标点，不属于值本身
     if (value) out[dimension] = value.replace(/[；;]\s*$/, '').trim();
   }
   return out;
