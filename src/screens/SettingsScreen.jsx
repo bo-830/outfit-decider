@@ -61,7 +61,7 @@ function Field({
   return (
     <View style={styles.field}>
       <View style={styles.fieldHead}>
-        <Text style={[styles.fieldLabel, locked && styles.fieldLabelLocked]}>{label}</Text>
+        <Text style={styles.fieldLabel}>{label}</Text>
         {meta ? <Text style={styles.fieldMeta}>{meta}</Text> : null}
       </View>
       <TextInput
@@ -90,13 +90,20 @@ function Field({
  * v1.5 起设置页有**两组互不相干的服务**，版面按这个事实分区，别让用户以为配一个就够：
  *   1. 引擎模式（§3.9c 三档）+「能看图的模型」——决定照片怎么变成判断；
  *   2. 决策模型来源 / 地址 / 模型名 / Key——决定 6 维分数由谁算。
- * 版面顺序把①放在②**之前**，并且①没配好时②整组不可操作（v1.6）：
- * 架构是「本地模型打分 → 能看图的模型纠正」，没有视觉模型就没有纠正环节，
- * 用户拿到的只是实测判断力不合格的本地分（得体 vs 荒谬的面试穿搭只差 0.4），
- * 所以先配视觉模型 = 先保证结论可用。
+ * 版面顺序把①放在②**之前**；并且**需要用视觉模型的档位**（默认档与 multimodal_only）
+ * 在①没配好时把②整组锁住（v1.6）：架构是「本地模型打分 → 能看图的模型纠正」，
+ * 没有视觉模型就没有纠正环节，用户拿到的只是实测判断力不合格的本地分
+ * （得体 vs 荒谬的面试穿搭只差 0.4），所以先配视觉模型 = 先保证结论可用。
+ * `laya_only` 例外：那一档不用视觉模型，锁住决策组会让纯本地模式不可用。
+ *
+ * **但禁用必须是"默认可绕开"的**：视觉端点本身坏掉（Key 错 / 服务不通 / 模型下线）时，
+ * 用户还得能配一个可用的决策模型，否则 App 变砖头——那正是最需要配 fallback 的时候。
+ * 所以提示块里给了显式临时解锁（`decisionUnlocked` + `decision-gate-unlock`）：解锁后
+ * 决策组可编辑、可保存 Key，提示块换成弱说明并留「恢复按顺序配置」；视觉就绪后该标记自动失效。
  *
  * 放行开关（`visionServerSide`）：直连本机 Laya 适配器时视觉模型**已配在服务端**，
  * 不该逼用户把服务端的 Key 在手机上再填一遍；勾选即视为视觉已就绪，并随配置持久化。
+ * 勾错的兜底写在复选框副文案里（结果页会出现「纠正未生效」），不额外加验证。
  */
 export default function SettingsScreen({
   config,
@@ -118,6 +125,10 @@ export default function SettingsScreen({
   const [keySaved, setKeySaved] = useState(false);
   const [draftVisionKey, setDraftVisionKey] = useState(config.visionApiKey || '');
   const [visionKeySaved, setVisionKeySaved] = useState(false);
+  /** 视觉区在滚动内容里的 y 偏移与 baseUrl 输入框引用：给「去配置」跳转用 */
+  const scrollRef = useRef(null);
+  const visionYRef = useRef(0);
+  const visionBaseUrlRef = useRef(null);
 
   // SPEC §2.1 的锚点取自 onSaveVisionKey 等冻结接口；写入统一走这一个出口，
   // 兼容两个 prop 名（onChangeConfig 为 v1.5 约定名，onChange 为既有接线）。
@@ -127,13 +138,45 @@ export default function SettingsScreen({
   };
 
   const engineMode = config.engineMode || DEFAULT_ENGINE_MODE;
-  const visionReady = !!(String(config.visionBaseUrl || '').trim() && String(config.visionModel || '').trim());
-  const modeNeedsVision = engineMode === 'laya_review' || engineMode === 'multimodal_only';
-  const visionIdle = engineMode === 'laya_only';
+  /** 「视觉已就绪」= 自己填了 baseUrl + 模型名，或声明服务端已经配好（二选一即可） */
+  const visionFilled = !!(String(config.visionBaseUrl || '').trim() && String(config.visionModel || '').trim());
+  const visionServerSide = config.visionServerSide === true;
+  const visionReady = visionFilled || visionServerSide;
+  /**
+   * 闸门只在**真的要用视觉模型**的档位生效：`laya_only` 既不纠正、describe 也走本地通道，
+   * 那时锁住决策组等于让纯本地模式不可用——顺序要求不该以一整档不可用为代价。
+   * 判据与 `src/engine/orchestrator.js` 的运行时分档一致：只有 `laya_only` 例外；
+   * 未知档位在运行时按默认档（`laya_review`）处理，这里同样算"需要视觉"。
+   */
+  const needsVision = engineMode !== 'laya_only';
+  const visionIdle = !needsVision;
+  /**
+   * 闸门本身该不该出现：需要视觉模型、但视觉还没就绪。
+   * 默认按顺序配置（决策组不可编辑），但**显式临时解锁**（`decisionUnlocked`）可以放行——
+   * 视觉端点出问题（Key 错 / 服务不通 / 模型下线）时用户必须还能配一个可用的决策模型，
+   * 否则 App 就是砖头，而那恰恰是最需要配 fallback 的时候。
+   * 视觉一旦就绪 `gateActive` 变 false，`decisionUnlocked` 自然失效（不写回、不残留 UI）。
+   */
+  const gateActive = needsVision && !visionReady;
+  const decisionUnlocked = config.decisionUnlocked === true;
+  const decisionLocked = gateActive && !decisionUnlocked;
+  const showUnlockedNote = gateActive && decisionUnlocked;
+  const readinessText = visionServerSide ? '服务端已配置' : visionFilled ? '已就绪' : '未配置';
+
+  /** 「去配置」：滚到视觉区 + 聚焦 baseUrl（点一下就能开始填，不用自己找） */
+  const jumpToVision = () => {
+    const scroller = scrollRef.current;
+    if (scroller && typeof scroller.scrollTo === 'function') {
+      scroller.scrollTo({ y: Math.max(0, (visionYRef.current || 0) - space.sm), animated: true });
+    }
+    const input = visionBaseUrlRef.current;
+    if (input && typeof input.focus === 'function') input.focus();
+  };
 
   return (
     <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       <ScrollView
+        ref={scrollRef}
         style={styles.flex}
         contentContainerStyle={[styles.content, { paddingBottom: Math.max(insets.bottom, space.lg) + space.xl }]}
         keyboardShouldPersistTaps="handled"
@@ -173,12 +216,54 @@ export default function SettingsScreen({
           </View>
         </View>
 
-        {/* ── 二、能看图的模型（与决策模型分开的两条通道） ─────────── */}
-        <View style={styles.block}>
-          <SectionLabel title="能看图的模型" meta="与决策模型分开" dim={visionIdle} />
+        {/* ── 二、能看图的模型（与决策模型分开的两条通道；必须在决策模型之前） ── */}
+        <View
+          style={styles.block}
+          onLayout={(event) => {
+            visionYRef.current = event?.nativeEvent?.layout?.y || 0;
+          }}
+        >
+          <SectionLabel
+            title="能看图的模型"
+            dim={visionIdle}
+            right={
+              <View style={styles.headRight}>
+                <Text style={styles.fieldMeta}>与决策模型分开</Text>
+                <Text
+                  testID="vision-readiness"
+                  style={[styles.readiness, visionReady ? styles.readinessOk : styles.readinessIdle]}
+                >
+                  {readinessText}
+                </Text>
+              </View>
+            }
+          />
           <Text style={styles.groupSub}>
             本地模型看不了照片。这一组负责把照片变成描述、并在需要时纠正分数。
           </Text>
+
+          <Pressable
+            testID="vision-server-side"
+            accessibilityRole="checkbox"
+            accessibilityState={{ checked: visionServerSide }}
+            aria-checked={visionServerSide}
+            onPress={() => patch({ visionServerSide: !visionServerSide })}
+            style={({ pressed }) => [styles.checkRow, pressed && styles.pressed]}
+          >
+            <View style={[styles.checkBox, visionServerSide && styles.checkBoxOn]}>
+              {visionServerSide ? <Text style={styles.checkMark}>✓</Text> : null}
+            </View>
+            <View style={styles.checkText}>
+              <Text style={styles.checkLabel}>
+                能看图的模型已配在服务端（如本机 Laya 适配器），无需在此重复填写
+              </Text>
+              {/* 勾错不会有别的反馈：把"退化时你会看到什么信号"直接写给用户，
+                  而不是再加一道验证（结果页的 reviewFailed 旁注就是那个信号）。 */}
+              <Text style={styles.checkSub}>
+                勾选后若服务端其实没配置，结果页会提示「纠正未生效」——那说明这个开关该取消。
+              </Text>
+            </View>
+          </Pressable>
 
           {visionIdle ? (
             <Text testID="vision-idle-hint" style={styles.groupIdleTag}>
@@ -186,7 +271,7 @@ export default function SettingsScreen({
             </Text>
           ) : null}
 
-          {modeNeedsVision && !visionReady ? (
+          {needsVision && !visionReady ? (
             <View testID="vision-missing-hint" style={styles.warnBox}>
               <Text style={styles.warnText}>
                 这一档需要能看图的模型，还没配置时分数会退回本地模型的判断
@@ -198,6 +283,7 @@ export default function SettingsScreen({
             label="baseUrl"
             meta="OpenAI 兼容端点"
             testID="engine-vision-baseurl"
+            inputRef={visionBaseUrlRef}
             value={config.visionBaseUrl}
             onChangeText={(visionBaseUrl) => patch({ visionBaseUrl })}
             placeholder="https://api.deepseek.com/v1"
@@ -262,9 +348,71 @@ export default function SettingsScreen({
           </View>
         </View>
 
-        {/* ── 三、决策模型（谁算这 6 维分） ──────────────────────── */}
+        {/* ── 三、决策模型（谁算这 6 维分）── 需要视觉的档位未配好时先按顺序来 ── */}
+        {decisionLocked ? (
+          <View style={styles.block}>
+            <View testID="decision-gate-hint" style={styles.warnBox}>
+              <Text style={styles.warnText}>
+                先配好能看图的模型，再配决策模型。没有它，纠正环节不会生效，你看到的只是本地模型的判断。
+              </Text>
+              <View style={styles.gateActions}>
+                <Pressable
+                  testID="decision-gate-jump"
+                  accessibilityRole="button"
+                  onPress={jumpToVision}
+                  style={({ pressed }) => [styles.jumpBtn, pressed && styles.pressed]}
+                >
+                  <Text style={styles.jumpText}>去配置</Text>
+                </Pressable>
+                {/* 逃生口：视觉端点坏掉时也不能把用户锁死在这里 */}
+                <Pressable
+                  testID="decision-gate-unlock"
+                  accessibilityRole="button"
+                  accessibilityState={{ disabled: false }}
+                  onPress={() => patch({ decisionUnlocked: true })}
+                  style={({ pressed }) => [styles.unlockBtn, pressed && styles.pressed]}
+                >
+                  <Text style={styles.unlockText}>仍然配置决策模型</Text>
+                </Pressable>
+              </View>
+            </View>
+          </View>
+        ) : null}
+
+        {showUnlockedNote ? (
+          <View style={styles.block}>
+            <View testID="decision-gate-unlocked-note" style={styles.quietNote}>
+              <Text style={styles.quietNoteText}>
+                已解锁决策模型。没有能看图的模型时，你看到的只是本地模型的判断。
+              </Text>
+              <Pressable
+                testID="decision-gate-relock"
+                accessibilityRole="button"
+                onPress={() => patch({ decisionUnlocked: false })}
+                style={({ pressed }) => [styles.relockBtn, pressed && styles.pressed]}
+              >
+                <Text style={styles.relockText}>恢复按顺序配置</Text>
+              </Pressable>
+            </View>
+          </View>
+        ) : null}
+
         <View style={styles.block}>
-          <SectionLabel title="决策模型来源" meta="二选一" />
+          <SectionLabel
+            title="决策模型来源"
+            dim={decisionLocked}
+            right={
+              <View style={styles.headRight}>
+                <Text style={styles.fieldMeta}>二选一</Text>
+                {decisionLocked ? (
+                  <Text testID="decision-lock-tag" style={styles.lockTag}>
+                    未解锁
+                  </Text>
+                ) : null}
+              </View>
+            }
+          />
+          <Text style={styles.groupSub}>负责打分。它在纠正之前运行，所以视觉模型要先配好。</Text>
           <View style={styles.modeRow}>
             {[
               { id: 'jev', label: 'JEv 云端', hint: '带 API Key' },
@@ -276,12 +424,27 @@ export default function SettingsScreen({
                   key={item.id}
                   testID={`engine-mode-${item.id}`}
                   accessibilityRole="button"
-                  accessibilityState={{ selected: active }}
+                  accessibilityState={{ selected: active, disabled: decisionLocked }}
                   onPress={() => patch({ mode: item.id })}
-                  style={({ pressed }) => [styles.mode, active && styles.modeOn, pressed && styles.pressed]}
+                  disabled={decisionLocked}
+                  style={({ pressed }) => [
+                    styles.mode,
+                    active && styles.modeOn,
+                    decisionLocked && styles.modeLocked,
+                    decisionLocked && active && styles.modeLockedOn,
+                    pressed && styles.pressed,
+                  ]}
                 >
-                  <Text style={[styles.modeLabel, active && styles.modeLabelOn]}>{item.label}</Text>
-                  <Text style={[styles.modeHint, active && styles.modeHintOn]}>{item.hint}</Text>
+                  <Text
+                    style={[
+                      styles.modeLabel,
+                      !decisionLocked && active && styles.modeLabelOn,
+                      decisionLocked && active && styles.modeLabelLockedOn,
+                    ]}
+                  >
+                    {item.label}
+                  </Text>
+                  <Text style={[styles.modeHint, !decisionLocked && active && styles.modeHintOn]}>{item.hint}</Text>
                 </Pressable>
               );
             })}
@@ -289,10 +452,11 @@ export default function SettingsScreen({
         </View>
 
         <View style={styles.block}>
-          <SectionLabel title="决策模型地址" meta="本机 / 局域网都行" />
+          <SectionLabel title="决策模型地址" meta="本机 / 局域网都行" dim={decisionLocked} />
           <Field
             label="baseUrl"
             testID="engine-baseurl"
+            locked={decisionLocked}
             value={config.baseUrl}
             onChangeText={(baseUrl) => patch({ baseUrl })}
             placeholder="http://127.0.0.1:8787"
@@ -302,6 +466,7 @@ export default function SettingsScreen({
             label="askPath"
             meta="打分请求路径"
             testID="engine-askpath"
+            locked={decisionLocked}
             value={config.askPath}
             onChangeText={(askPath) => patch({ askPath })}
             placeholder="/ask"
@@ -310,6 +475,7 @@ export default function SettingsScreen({
             label="healthPath"
             meta="连接测试路径"
             testID="engine-healthpath"
+            locked={decisionLocked}
             value={config.healthPath}
             onChangeText={(healthPath) => patch({ healthPath })}
             placeholder="/health"
@@ -317,10 +483,11 @@ export default function SettingsScreen({
         </View>
 
         <View style={styles.block}>
-          <SectionLabel title="决策模型名" meta="填服务端认的名字" />
+          <SectionLabel title="决策模型名" meta="填服务端认的名字" dim={decisionLocked} />
           <Field
             label="model"
             testID="engine-model"
+            locked={decisionLocked}
             value={config.model}
             onChangeText={(model) => patch({ model })}
             placeholder="outfit-judge-v1"
@@ -328,10 +495,15 @@ export default function SettingsScreen({
         </View>
 
         <View style={styles.block}>
-          <SectionLabel title="决策模型的 Key" meta={config.mode === 'laya' ? '本地模式不需要' : '只存这台设备'} />
+          <SectionLabel
+            title="决策模型的 Key"
+            meta={config.mode === 'laya' ? '本地模式不需要' : '只存这台设备'}
+            dim={decisionLocked}
+          />
           <Field
             label="API Key"
             testID="engine-apikey"
+            locked={decisionLocked}
             value={draftKey}
             onChangeText={(text) => {
               setDraftKey(text);
@@ -343,13 +515,21 @@ export default function SettingsScreen({
           <Pressable
             testID="btn-save-key"
             accessibilityRole="button"
+            accessibilityState={{ disabled: decisionLocked }}
             onPress={async () => {
               await onSaveKey(draftKey);
               setKeySaved(true);
             }}
-            style={({ pressed }) => [styles.secondary, pressed && styles.pressed]}
+            disabled={decisionLocked}
+            style={({ pressed }) => [
+              styles.secondary,
+              decisionLocked && styles.secondaryLocked,
+              pressed && styles.pressed,
+            ]}
           >
-            <Text style={styles.secondaryText}>{keySaved ? '已保存' : '保存 Key'}</Text>
+            <Text style={[styles.secondaryText, decisionLocked && styles.secondaryTextLocked]}>
+              {keySaved ? '已保存' : '保存 Key'}
+            </Text>
           </Pressable>
           <Text style={styles.note}>
             {keySecure
@@ -359,15 +539,25 @@ export default function SettingsScreen({
         </View>
 
         <View style={styles.block}>
-          <SectionLabel title="决策模型连接测试" meta="发一次 GET 请求" />
+          <SectionLabel title="决策模型连接测试" meta="发一次 GET 请求" dim={decisionLocked} />
           <Pressable
             testID="btn-test-conn"
             accessibilityRole="button"
+            accessibilityState={{ disabled: testing || decisionLocked }}
             onPress={onTestConnection}
-            disabled={testing}
-            style={({ pressed }) => [styles.secondary, pressed && styles.pressed, testing && styles.disabled]}
+            disabled={testing || decisionLocked}
+            style={({ pressed }) => [
+              styles.secondary,
+              decisionLocked && styles.secondaryLocked,
+              pressed && styles.pressed,
+              testing && styles.disabled,
+            ]}
           >
-            <Text style={styles.secondaryText}>{testing ? '测试中…' : '测试连接'}</Text>
+            <Text
+              style={[styles.secondaryText, decisionLocked && styles.secondaryTextLocked]}
+            >
+              {testing ? '测试中…' : '测试连接'}
+            </Text>
           </Pressable>
           <View testID="test-conn-result" style={styles.connBox}>
             {conn ? (
@@ -415,6 +605,57 @@ const styles = StyleSheet.create({
   sub: { fontFamily: SANS, fontSize: font.small, lineHeight: 20, color: colors.textDim, marginTop: space.sm - 2 },
   block: { marginTop: space.xl - 4, paddingHorizontal: layout.padX },
   groupSub: { fontFamily: SANS, fontSize: font.small, lineHeight: 20, color: colors.textDim, marginBottom: space.md },
+  /** 标题行右侧：说明 + 状态标记 / 锁标记，两者共用同一个基线 */
+  headRight: { flexDirection: 'row', alignItems: 'baseline', gap: space.sm },
+  /** 视觉区「已就绪 / 服务端已配置 / 未配置」状态标记（success 只用于「已就绪」与「服务端已配置」） */
+  readiness: {
+    fontFamily: SANS,
+    fontSize: font.tiny + 0.5,
+    fontWeight: '600',
+    paddingHorizontal: space.sm,
+    paddingVertical: 3,
+    borderRadius: radius.pill,
+    overflow: 'hidden',
+  },
+  readinessOk: { color: colors.success, backgroundColor: colors.surfaceAlt },
+  readinessIdle: { color: colors.textDim, backgroundColor: colors.surfaceAlt },
+  lockTag: {
+    fontFamily: SANS,
+    fontSize: font.tiny + 0.5,
+    fontWeight: '600',
+    color: colors.warn,
+    backgroundColor: colors.primarySoft,
+    paddingHorizontal: space.sm,
+    paddingVertical: 3,
+    borderRadius: radius.pill,
+    overflow: 'hidden',
+  },
+  /** 服务端已配好视觉模型的放行开关：整行可点，44px 触达 */
+  checkRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: space.sm + 2,
+    minHeight: HIT,
+    marginBottom: space.md,
+    paddingVertical: space.sm,
+  },
+  checkBox: {
+    width: 22,
+    height: 22,
+    marginTop: 1,
+    borderRadius: 6,
+    borderWidth: 1.5,
+    borderColor: colors.textDim,
+    backgroundColor: colors.surface,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  checkBoxOn: { borderColor: colors.text, backgroundColor: colors.text },
+  checkMark: { fontFamily: SANS, fontSize: font.small, fontWeight: '700', color: colors.surface, lineHeight: 16 },
+  checkText: { flex: 1, minWidth: 0 },
+  checkLabel: { fontFamily: SANS, fontSize: font.small, lineHeight: 20, color: colors.text },
+  // 副文案说清"勾错了会看到什么信号"，而不是让用户去猜；textDim on bg = 5.39:1，过 AA
+  checkSub: { fontFamily: SANS, fontSize: font.tiny + 0.5, lineHeight: 17, color: colors.textDim, marginTop: 3 },
   // 弱化不用 opacity：整组降到 55% 会把标签文字压到 ~2.25:1（低于 AA）。
   // 改用「未启用」标记 + 标题降为次级墨色，输入仍然可读、可预配置。
   groupIdleTag: {
@@ -440,6 +681,61 @@ const styles = StyleSheet.create({
     backgroundColor: colors.primarySoft,
   },
   warnText: { fontFamily: SANS, fontSize: font.small, lineHeight: 20, color: colors.warn },
+  /** 提示块里的两个动作并排：主推「去配置」，逃生口「仍然配置决策模型」在同一行的右侧 */
+  gateActions: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: space.sm },
+  /** 提示块里的一键跳转（「去配置」）：44px 触达，沿用 warn 色系描边 */
+  jumpBtn: {
+    alignSelf: 'flex-start',
+    minHeight: HIT,
+    marginTop: space.sm,
+    paddingHorizontal: space.lg,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    borderColor: colors.warn,
+    backgroundColor: colors.surface,
+  },
+  jumpText: { fontFamily: SANS, fontSize: font.small, fontWeight: '600', color: colors.warn },
+  /** 逃生口（「仍然配置决策模型」）：中性描边 + 墨色字，是可用动作但不是主推动作 */
+  unlockBtn: {
+    alignSelf: 'flex-start',
+    minHeight: HIT,
+    marginTop: space.sm,
+    paddingHorizontal: space.lg,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  unlockText: { fontFamily: SANS, fontSize: font.small, fontWeight: '600', color: colors.text },
+  /** 解锁后的弱说明：中性底 + textDim（4.94:1），明确不是警告语气 */
+  quietNote: {
+    marginBottom: space.md,
+    paddingHorizontal: space.md,
+    paddingVertical: space.sm + 2,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceAlt,
+  },
+  quietNoteText: { fontFamily: SANS, fontSize: font.small, lineHeight: 20, color: colors.textDim },
+  /** 重新上锁：比说明更弱的文字按钮，44px 触达 */
+  relockBtn: {
+    alignSelf: 'flex-start',
+    minHeight: HIT,
+    marginTop: space.sm,
+    paddingHorizontal: space.lg,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    borderColor: colors.textDim,
+    backgroundColor: colors.surface,
+  },
+  relockText: { fontFamily: SANS, fontSize: font.small, fontWeight: '600', color: colors.textDim },
   // 三档模式：整行可点、两行文案不缩字号；选中＝墨色实心（沿用 chip 的选中语言）
   modeList: { gap: space.sm },
   modeCard: {
@@ -482,8 +778,12 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   modeOn: { borderColor: colors.text, backgroundColor: colors.text },
+  /** 锁定态：换成凹陷的 surfaceAlt 底（不是降透明度，文字仍 5.39:1 可读） */
+  modeLocked: { backgroundColor: colors.surfaceAlt },
+  modeLockedOn: { borderColor: colors.textDim, backgroundColor: colors.surfaceAlt },
   modeLabel: { fontFamily: SANS, fontSize: font.body, fontWeight: '600', color: colors.textDim },
   modeLabelOn: { color: colors.surface },
+  modeLabelLockedOn: { color: colors.text },
   modeHint: { fontFamily: SANS, fontSize: font.tiny, color: colors.textDim, marginTop: 3 },
   modeHintOn: { color: colors.surfaceAlt },
   field: { marginBottom: space.md },
@@ -503,6 +803,8 @@ const styles = StyleSheet.create({
     fontSize: font.body - 1,
   },
   inputMulti: { minHeight: 80, textAlignVertical: 'top' },
+  // 锁定态：凹陷的浅底 + 边框，一眼看出"现在不能改"；文字保持 textDim（surfaceAlt 上 ≈5.0:1，仍过 AA）
+  inputLocked: { backgroundColor: colors.surfaceAlt, borderColor: colors.border, color: colors.textDim },
   secondary: {
     minHeight: HIT,
     marginTop: space.sm,
@@ -514,6 +816,8 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface,
   },
   secondaryText: { fontFamily: SANS, fontSize: font.small, fontWeight: '600', color: colors.text },
+  secondaryLocked: { borderColor: colors.border, backgroundColor: colors.surfaceAlt },
+  secondaryTextLocked: { color: colors.textDim },
   pressed: { opacity: 0.75 },
   disabled: { opacity: 0.5 },
   note: { fontFamily: SANS, fontSize: font.tiny + 0.5, lineHeight: 17, color: colors.textDim, marginTop: space.sm },

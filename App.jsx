@@ -34,6 +34,8 @@ const PERSISTED_CONFIG_KEYS = [
   // v1.6：直连本机 Laya 适配器时，视觉模型已配在服务端，用户无需在手机上重复填写。
   // 这个开关只影响设置页的"可否配置决策模型"闸门，不改变运行时行为。
   'visionServerSide',
+  // 用户显式绕过"视觉先行"闸门（视觉端点出问题时的自救路径）
+  'decisionUnlocked',
 ];
 
 /**

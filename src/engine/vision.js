@@ -27,9 +27,16 @@ const VISION_DESCRIBE_INSTRUCTION = [
 ].join('\n');
 
 export function makeVisionEngine({ api, model } = {}) {
-  /** 是否具备"能看图的模型"这条通道。 */
+  /**
+   * App 是否**能自己**发 image_url 请求（决定 describe 走哪条通道）。
+   * 注意必须是 visionEndpointConfigured 而不是 visionReady：
+   * 服务端形态（visionServerSide）下 App 没有自己的端点 → 必须退回决策通道，
+   * 由适配器在服务端看图。用错判据会让 describe 直接抛 vision_unconfigured（实测踩过）。
+   */
   function hasVisionChannel() {
-    return !!(api && typeof api.vision === 'function' && api.visionConfigured && api.visionConfigured());
+    if (!api) return false;
+    if (typeof api.visionEndpointConfigured === 'function') return api.visionEndpointConfigured();
+    return !!(typeof api.vision === 'function' && api.visionConfigured && api.visionConfigured());
   }
 
   /**

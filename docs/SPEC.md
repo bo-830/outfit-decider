@@ -471,11 +471,32 @@ api.askBatch({ looks: [{ lookId, state, questions }], timeoutMs?, signal? })
 用户拿到的正是实测判断力不合格的本地分（见 §3.9b）。所以视觉组在决策组之前，
 且视觉未就绪时**决策组整体禁用**。
 
+**闸门按档位条件化**（否则 `laya_only` 会被自己的提示打脸——那一档会显示「当前档位用不到这一组」，
+却又把决策组锁死，等于让纯本地模式无法使用）：
+
+```
+needsVision    = engineMode !== 'laya_only'     // laya_review（默认）与 multimodal_only 都为 true
+decisionLocked = needsVision && !visionReady
+```
+
+- `laya_only` → 不锁决策组；从 `laya_only` 切回 `laya_review` → **立刻重新上锁**（闸门是活的）。
 - 「已就绪」判据：`visionBaseUrl` 与 `visionModel` 均非空（trim 后）**或** `visionServerSide === true`。
 - `visionServerSide`（`DEFAULT_CONFIG`）用于**直连本机 Laya 适配器**的场景：
   适配器已用自己的 `.env.local` 在服务端配好视觉模型，用户不应被迫在手机里重复填 Key。
-  该开关只影响设置页闸门，不改变运行时行为。
-- 新增锚点：`decision-gate-hint`、`decision-gate-jump`、`vision-server-side`、`vision-readiness`。
+  该开关只影响设置页闸门，**不改变运行时行为**；若勾错而服务端其实没配，
+  退化路径仍是既有的 `vision_unconfigured` 回退 + 结果页「纠正未生效」旁注。
+  **因此该复选框旁边必须写明这个信号**（"勾选后若服务端其实没配置，结果页会提示纠正未生效"），
+  让用户知道勾错了会看到什么，而不是要求额外做一次服务端探测。
+- **必须留一条自救路径**：视觉端点本身出问题时（Key 错、服务不通、模型下线），
+  用户仍要能配一个可用的决策模型，否则 App 变砖。所以禁用之外必须有**显式临时解锁**：
+  `decisionUnlocked`（`DEFAULT_CONFIG`）→ `decisionLocked = needsVision && !visionReady && !decisionUnlocked`。
+  - 默认仍按顺序（未配视觉 → 决策组不可编辑，视觉上明确降级）。
+  - `decision-gate-unlock`「仍然配置决策模型」→ 写 `decisionUnlocked: true` → 立即解锁且**能保存 Key**。
+  - 解锁后 `decision-gate-hint` 换成弱说明 `decision-gate-unlocked-note`，并给 `decision-gate-relock`「恢复按顺序配置」。
+  - 视觉就绪（含 `visionServerSide`）时 `decisionUnlocked` 自动失效（无需手动清）。
+  - 这条不是为了绕过顺序，而是为了让"视觉先行"不变成单点故障。
+- 新增锚点：`decision-gate-hint`、`decision-gate-jump`、`vision-server-side`、`vision-readiness`、
+  `decision-gate-unlock`、`decision-gate-relock`、`decision-gate-unlocked-note`。
 
 ### 3.12 `src/store/history.js`
 

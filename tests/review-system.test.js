@@ -88,7 +88,33 @@ function makeDualFetch({
       };
     }
     calls.decision.push({ url, body });
-    // describe_* 只有在"没配多模态"时才会走到这里
+    if (process.env.OD_DEBUG_REVIEW) {
+      // eslint-disable-next-line no-console
+      console.log('DECISION CALL ids=', (body.questions || []).map((q) => q.id).join('|'),
+        'images=', (body.images || []).length, 'stateLen=', String(body.state || '').length);
+    }
+    // describe_* 只有在"没配多模态"时才会走到这里；但**纠正**也可能走这里——
+    // 当 visionServerSide=true（视觉配置在服务端）时，App 把纠正指令与图片
+    // 一起经决策通道发给适配器，由适配器在服务端看图。
+    // 用 id==='review' 区分这两种走法。
+    const isReview = Array.isArray(body.questions)
+      && body.questions.some((q) => q && q.id === 'review');
+    if (isReview) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          model: 'vision-test',
+          answers: [{
+            id: 'review',
+            type: 'text',
+            content: reviewJson === null ? '' : reviewJson,
+            confidence: 0.8,
+          }],
+          usage: { prompt_tokens: 500, completion_tokens: 60, total_tokens: 560 },
+        }),
+      };
+    }
     const isDescribe = Array.isArray(body.questions)
       && body.questions.some((q) => String(q.id).startsWith('describe_'));
     const answers = isDescribe
@@ -311,7 +337,92 @@ test('未配置多模态端点 → 报 vision_unconfigured，并给出配置指�
   assert.equal(quick.reviewErrorKind, 'vision_unconfigured');
 });
 
+test('visionServerSide=true → 判据就绪，且纠正改走决策通道带图（实测踩过的分裂）', async () => {
+  // 本机 Laya 适配器形态：视觉配置在**服务端**（适配器读自己的 .env.local），
+  // App 侧没有 visionBaseUrl/visionModel。这里直测两个单元契约，
+  // 而不是走整条 orchestrator（替身的通道识别会干扰，见下方注释）。
+  const ready = makeApi({
+    config: { ...DEFAULT_CONFIG, visionBaseUrl: '', visionModel: '', visionServerSide: true },
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({}) }),
+  });
+  // ① 判据必须认 visionServerSide，否则设置页解锁了、纠正却会放弃（真实发生的分裂）
+  assert.equal(ready.visionReady(), true, 'visionServerSide 必须算"纠正可能生效"');
+  // ② 但"App 有没有自己的端点"仍必须是 false —— describe 据此退回决策通道，
+  //    由适配器在服务端看图。这两个语义混用一次就造成了 vision_unconfigured 分裂。
+  assert.equal(ready.visionEndpointConfigured(), false, 'App 侧确实没有自己的端点');
+  assert.equal(ready.visionConfigured(), false, 'visionConfigured 是端点语义，不能算服务端形态');
+
+  // ③ 服务端形态下纠正必须经决策通道、且**必须带图**（否则服务端也无从判断）
+  const calls = [];
+  const api = makeApi({
+    config: { ...DEFAULT_CONFIG, visionBaseUrl: '', visionModel: '', visionServerSide: true },
+    fetchImpl: async (url, init) => {
+      const body = JSON.parse(init.body || '{}');
+      calls.push({ url: String(url), body });
+      const isReview = (body.questions || []).some((q) => q && q.id === 'review');
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          model: 'vision-test',
+          answers: isReview
+            ? [{ id: 'review', type: 'text', content: reviewedJson([reviewRow('look1', 4.6)]), confidence: 0.8 }]
+            : [],
+          usage: {},
+        }),
+      };
+    },
+  });
+  const system = makeReviewSystem({ api });
+  const result = await system.reviewWithPrompt({
+    prompt: '纠正指令',
+    artifacts: artifacts(['look1']),
+    lookIds: ['look1'],
+    base: null,
+  });
+
+  const reviewCall = calls.find((c) => (c.body.questions || []).some((q) => q && q.id === 'review'));
+  assert.ok(reviewCall, '纠正确实发出了请求');
+  assert.ok(!/chat\/completions/.test(reviewCall.url), 'App 没有自己的端点 → 不得打 chat/completions');
+  // 本文件的 artifacts() 返回 2 套（LOOKS = look1/look2）；
+  // 图必须**全部**随决策通道发出（缺一套服务端就少看一套）
+  assert.equal(reviewCall.body.images.length, 2, '必须把图随决策通道一起发出');
+  assert.ok(reviewCall.body.images.every((img) => typeof img.dataUri === 'string' && img.dataUri.startsWith('data:')));
+  assert.equal(reviewCall.body.images[0].id, 'look1');
+  assert.equal(result.scores.look1.overall_score, 4.6, '纠正结果要被解析出来');
+});
+
 /* ────────────────────────── 解析与契约 ────────────────────────── */
+
+test('parseReviewScores：必须吃下真实模型给的「按 lookId 嵌套 + 中文维度名」形状', () => {
+  // 这是 DeepSeek-flash 看真实照片时**实际**返回的形状（实测抓到的原文）。
+  // 之前只认 {scores:[...]}，导致每一轮纠正都走 parse 失败回退、被静默丢弃。
+  const realShape = JSON.stringify({
+    look1: { 整体得分: 4.6, 美观度: 4.4, 场合适配度: 5.0, 身材友好度: 4.1, 风格统一度: 4.8, 实用舒适度: 4.2 },
+    look2: { 整体得分: 1.5, 美观度: 2.6, 场合适配度: 0.8, 身材友好度: 3.0, 风格统一度: 1.8, 实用舒适度: 3.2 },
+  });
+  const scores = parseReviewScores(realShape, ['look1', 'look2']);
+  assert.equal(scores.look1.overall_score, 4.6);
+  assert.equal(scores.look1.scene_score, 5.0, '场合适配度 要映射到 scene_score');
+  assert.equal(scores.look1.figure_score, 4.1, '身材友好度 要映射到 figure_score');
+  assert.equal(scores.look2.overall_score, 1.5);
+  assert.equal(scores.look2.scene_score, 0.8);
+});
+
+test('parseReviewScores：裸数组与英文键混用也要能归一化', () => {
+  const mixed = JSON.stringify([
+    { lookId: 'look1', overall: 4.0, aesthetic: 3.5, scene: 4.2, figure: 3.1, style: 3.9, practical: 4.4 },
+  ]);
+  const scores = parseReviewScores(mixed, ['look1']);
+  assert.equal(scores.look1.overall_score, 4.0);
+  assert.equal(scores.look1.scene_score, 4.2);
+  assert.equal(scores.look1.practical_score, 4.4);
+});
+
+test('parseReviewScores：中文形状里六维不齐的套仍要拒绝（不给半套）', () => {
+  const partial = JSON.stringify({ look1: { 整体得分: 4.6, 美观度: 4.4 } });
+  assert.throws(() => parseReviewScores(partial, ['look1']), (err) => err.kind === 'parse');
+});
 
 test('parseReviewScores：容错 markdown 围栏与前后缀', () => {
   const good = parseReviewScores(

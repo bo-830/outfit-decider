@@ -391,6 +391,16 @@ async function waitBannerText(page, mustInclude, timeoutMs) {
 async function setInputValue(page, testId, value) {
   const sel = `[data-testid="${testId}"]`;
   await page.waitForSelector(sel, { timeout: 15000 });
+  // 关键：禁用的输入框会让下面的点击/打字**静默无效**，调用方却以为注入成功——
+  // 那会产出"假证据"（本轮 §3.11c 的闸门就制造过这个陷阱）。
+  // 所以这里先查 DOM 的 disabled/aria-disabled，禁用就直接抛错。
+  const disabled = await page.$eval(sel, (el) => {
+    const tag = el.tagName;
+    const nativeDisabled = el.disabled === true || (tag === 'INPUT' && el.readOnly === true);
+    return nativeDisabled || el.getAttribute('aria-disabled') === 'true';
+  }).catch(() => false);
+  if (disabled) throw new Error(`input ${testId} is disabled`);
+
   await page.click(sel, { clickCount: 3 });
   await page.keyboard.down('Control');
   await page.keyboard.press('KeyA');
@@ -398,6 +408,12 @@ async function setInputValue(page, testId, value) {
   await page.keyboard.press('Backspace');
   if (value) await page.keyboard.type(value, { delay: 8 });
   await sleep(200);
+
+  // 回读一次：值没变说明注入其实没生效（比上面的 disabled 更兜底）
+  const actual = await page.$eval(sel, (el) => (el.value === undefined ? el.textContent : el.value)).catch(() => null);
+  if (value && actual !== value && !String(actual || '').includes(value)) {
+    throw new Error(`input ${testId} did not take the value (got ${JSON.stringify(String(actual || '').slice(0, 40))})`);
+  }
 }
 
 /** 跑纯逻辑单测（node 24 下必须用 glob，目录形式会失败），返回真实 pass/fail 数 */
@@ -605,10 +621,51 @@ async function main() {
 
     const exchanges = [];
     state.allExchanges = exchanges;
+
+    /**
+     * 从请求 state 文本里认出是哪一套（【穿搭一】…【穿搭四】）。
+     * 批处理下 request.state 不存在（每套的 state 在 looks[] 里），但展开后的 per-look 记录
+     * 会带上 lookId，所以这只是**兜底**路径。
+     */
+    function lookIdFromStateText(stateText) {
+      const hit = String(stateText || '').match(/【穿搭\s*([一二三四1234])】/);
+      if (!hit) return null;
+      const index = ['一', '二', '三', '四'].indexOf(hit[1]);
+      const digit = Number(hit[1]);
+      if (index >= 0) return `look${index + 1}`;
+      if (Number.isFinite(digit) && digit >= 1 && digit <= 4) return `look${digit}`;
+      return null;
+    }
+
+    /**
+     * 批处理请求 → 「某一套自己的」请求形状（state + questions）。
+     * `score-coherence` 是靠请求 state 里的【穿搭N】段头认 lookId 的，
+     * 批处理把多套塞在一个 body 里，所以必须还原成单套形状，否则那条交叉校验会认不出（本轮踩过）。
+     */
+    function lookRequestsOf(batchRequest, lookId) {
+      const looks = Array.isArray(batchRequest?.looks) ? batchRequest.looks : [];
+      const hit = looks.find((look) => look && String(look.lookId) === String(lookId));
+      const fallback = looks[0];
+      const chosen = hit || fallback || {};
+      return {
+        model: batchRequest?.model,
+        state: chosen.state,
+        questions: chosen.questions,
+        images: chosen.images,
+        _fromBatch: true,
+      };
+    }
     page.on('response', async (res) => {
       const url = res.url();
-      if (!/\/ask(\?|$)/.test(url)) return;
-      const entry = { url, status: res.status(), contentType: res.headers()['content-type'] || '' };
+      // v1.6 起打分走批处理：/ask/batch 必须和 /ask 一起被记录，
+      // 否则 scoreExchanges 恒为 0，#2/#3 的形状断言会**假红**（本轮踩过）。
+      if (!/\/ask(\/batch)?(\?|$)/.test(url)) return;
+      const entry = {
+        url,
+        status: res.status(),
+        contentType: res.headers()['content-type'] || '',
+        isBatch: /\/ask\/batch(\?|$)/.test(url),
+      };
       const reqData = res.request()?.postData?.();
       if (reqData) {
         try {
@@ -630,7 +687,12 @@ async function main() {
       } catch (err) {
         entry.readError = String(err && err.message ? err.message : err);
       }
-      const qs = entry.request?.questions;
+
+      // 批处理请求体里没有顶层 questions：每套各自带一份，取第一套的代表形状
+      const firstLook = Array.isArray(entry.request?.looks) ? entry.request.looks[0] : null;
+      const qs = Array.isArray(entry.request?.questions)
+        ? entry.request.questions
+        : (firstLook && Array.isArray(firstLook.questions) ? firstLook.questions : null);
       if (Array.isArray(qs)) {
         entry.kind = qs.some((q) => String(q?.id || '').startsWith('describe_'))
           ? 'describe'
@@ -641,7 +703,32 @@ async function main() {
               : 'other';
       }
       exchanges.push(entry);
-      if (entry.kind === 'score') state.scoreExchanges.push(entry);
+      if (entry.kind === 'score') {
+        if (entry.isBatch && Array.isArray(entry.body?.looks)) {
+          // 批处理：一次响应对应多套。**只**记录展开后的"一套一份答案"，
+          // 不要再把批处理本身也 push 进 scoreExchanges —— 否则数量翻倍（本轮踩过），
+          // 而 #2/#3 要的是"每套恰好一条打分记录"。
+          for (const look of entry.body.looks) {
+            const perLook = {
+              url: `${url}#${look.lookId}`,
+              status: entry.status,
+              contentType: entry.contentType,
+              isBatch: true,
+              lookId: look.lookId,
+              // request 里保留**该套自己的 state 与 questions**，让靠 state 段头找 lookId 的
+              // 交叉校验（score-coherence）在批处理下依然成立
+              request: lookRequestsOf(entry.request, look.lookId),
+              body: { model: look.model, answers: look.answers, usage: look.usage },
+              raw: JSON.stringify({ model: look.model, answers: look.answers, usage: look.usage }),
+            };
+            exchanges.push(perLook);
+            state.scoreExchanges.push(perLook);
+          }
+          state.batchRequests = (state.batchRequests || 0) + 1;
+        } else {
+          state.scoreExchanges.push(entry);
+        }
+      }
       if (entry.kind === 'deep') state.deepExchanges.push(entry);
     });
 
@@ -682,6 +769,19 @@ async function main() {
     await step('settings: baseUrl + api key (before scoring)', async () => {
       await clickTestId(page, 'tab-settings');
       await sleep(500);
+
+      // SPEC §3.11c：设置页默认"视觉先行"——视觉未就绪时决策组不可编辑。
+      // 本轮验收不依赖外部视觉端点，所以走**显式临时解锁**（这正是那条自救路径的实战用例）。
+      // 不加这一步的话：engine-apikey 被禁用 → Key 存不进去 → #8 的 keyPersisted 会红，
+      // 而且 engine-baseurl 会被"静默注入失败却记为已注入"（假证据）。
+      if (await exists(page, '[data-testid="decision-gate-unlock"]')) {
+        try {
+          await clickTestId(page, 'decision-gate-unlock');
+          await sleep(300);
+        } catch (err) {
+          report.stepErrors.push(`decision-gate-unlock failed: ${err.message}`);
+        }
+      }
 
       if (state.mockDedicated) {
         try {
@@ -803,7 +903,7 @@ async function main() {
       state.__faultPhase = true;
       const handler = (req) => {
         const inject = state.__injectModel;
-        if (inject && req.method() === 'POST' && /\/ask(\?|$)/.test(req.url())) {
+        if (inject && req.method() === 'POST' && /\/ask(\/batch)?(\?|$)/.test(req.url())) {
           try {
             const body = JSON.parse(req.postData() || '{}');
             body.model = inject;
@@ -1028,14 +1128,28 @@ async function main() {
               Math.abs(a.score * 10 - Math.round(a.score * 10)) < 1e-9,
           ),
       );
-    const allLooksScored = state.scoreExchanges.length === ranked.length && ranked.length > 0;
+    // allLooksScored 必须**按 lookId** 判定，不能拿请求条数和套数比：
+    // scoreExchanges 是按套展开的（批处理时由一次请求展开成 N 条），
+    // 而且界面可能再跑一轮（单套重试 / 复跑），条数本来就会多于套数。
+    const scoredLookIds = new Set(
+      state.scoreExchanges
+        .map((e) => e.lookId || lookIdFromStateText(e.request?.state))
+        .filter(Boolean),
+    );
+    const missingLookIds = ranked.map((r) => r.lookId).filter((id) => !scoredLookIds.has(id));
+    const allLooksScored = ranked.length > 0 && missingLookIds.length === 0;
+    const allLooksScoredDetail = allLooksScored
+      ? 'every look has a score'
+      : `missing=${missingLookIds.join(',')}`;
     add(
       2,
       'system-one-structure',
       '§7.2',
       overallOk && probeScoresOk && descOk && wireOk && allLooksScored,
-      `ranked=${ranked.length} scoreExchanges=${state.scoreExchanges.length} overall=[${ranked.map((r) => r.overall).join(',')}] ` +
-        `overallOk=${overallOk} probeScoresOk=${probeScoresOk} desc=${descOk} wire6dims1dp=${wireOk} allLooksScored=${allLooksScored}`,
+      `ranked=${ranked.length} scoreExchanges=${state.scoreExchanges.length} (batch=${state.batchRequests || 0}) ` +
+        `overall=[${ranked.map((r) => r.overall).join(',')}] ` +
+        `overallOk=${overallOk} probeScoresOk=${probeScoresOk} desc=${descOk} wire6dims1dp=${wireOk} ` +
+        `allLooksScored=${allLooksScored}(${allLooksScoredDetail})`,
     );
 
     // 附加（非门禁）：DOM 每张卡的维度行数，作为「6 维确实渲染出来」的旁证

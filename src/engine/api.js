@@ -24,6 +24,9 @@ export const DEFAULT_CONFIG = {
   // 视觉模型是否已配在**服务端**（如本机 Laya 适配器用自己的 .env.local 配好）。
   // 只影响设置页的配置闸门顺序，不改变运行时行为。
   visionServerSide: false,
+  // 用户显式选择「仍然配置决策模型」（绕过 §3.11c 的视觉先行闸门）。
+  // 存在的理由：视觉端点本身出问题时，必须还能配一个可用的决策模型，否则 App 变砖。
+  decisionUnlocked: false,
   // 推理模型的输出预算。太小 → reasoning 吃光 → content 空串（HTTP 200），
   // 会被误判成 parse 失败。纠正一次要给 N 套 × 6 维分数，留足余量。
   visionMaxTokens: 4000,
@@ -391,14 +394,29 @@ export function makeApi({ config, fetchImpl = globalThis.fetch } = {}) {
   }
 
   /**
-   * 多模态通道是否可用（SPEC §3.9c）。
-   * vision.js 用它决定 describe 走哪条通道：配了就走 vision 看原图，没配就退回决策模型的
-   * JEv `/ask`。没有这个判断，"只配了本地决策模型"的部署会在第一步就整体失败。
-   * 注意：必须在 makeApi 闭包内定义，才能读到 settings()。
+   * App 侧是否**自己**配了多模态端点（visionBaseUrl + visionModel 都非空）。
+   *
+   * 语义边界很重要，别和下面的 visionReady 混：
+   *   - 本函数只回答"App 能不能自己直接发起 image_url 请求" → 决定 describe/纠正**走哪条通道**。
+   *   - 服务端形态（visionServerSide）下 App 没有自己的端点，所以这里是 false，
+   *     describe/纠正会经决策通道发给适配器，由适配器在服务端看图。
    */
-  function visionConfigured() {
+  function visionEndpointConfigured() {
     const cfg = settings();
     return !!(normalizeBaseUrl(cfg.visionBaseUrl) && cfg.visionModel);
+  }
+
+  /**
+   * 纠正是否**可能生效**：App 自带端点，**或**视觉配置在服务端（`visionServerSide`）。
+   *
+   * 这个判据供"设置页闸门"与"要不要尝试纠正"使用，**不要**拿它去决定走哪条通道——
+   * 服务端形态下它的值为 true，但 App 并没有可直接调用的 vision 端点。
+   * （这两个语义被混用一次，就造成了"设置页解锁、describe 却抛 vision_unconfigured"的分裂。）
+   */
+  function visionReady() {
+    const cfg = settings();
+    if (cfg.visionServerSide === true) return true;
+    return visionEndpointConfigured();
   }
 
   /** 决策模型（打分）是否已配置：baseUrl 是唯一必需项。 */
@@ -406,7 +424,16 @@ export function makeApi({ config, fetchImpl = globalThis.fetch } = {}) {
     return !!normalizeBaseUrl(settings().baseUrl);
   }
 
-  return { ask, askBatch, health, vision, visionConfigured, decisionConfigured };
+  return {
+    ask,
+    askBatch,
+    health,
+    vision,
+    visionConfigured: visionEndpointConfigured,
+    visionEndpointConfigured,
+    visionReady,
+    decisionConfigured,
+  };
 }
 
 /** 批处理路径：在 askPath 后加 /batch（askPath='/ask' → '/ask/batch'）。 */

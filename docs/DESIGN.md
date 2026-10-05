@@ -179,6 +179,80 @@ B 的语言被翻译成中文与纸感，不搬它的深色底与英文铭牌：
 - 纠正生效（`reviewFailed !== true` 且 `reviewChange` 非空）：徽标右侧一行 **已按画面重新判断**。
 - **不显示任何分数差值**：用户要知道"结论来自谁"，不需要看两个模型差了几分。
 
+### 4.6 设置页顺序与「视觉先行」闸门（v1.6）
+
+**版面顺序改回因果顺序**：① 引擎模式 → ② **能看图的模型** → ③ **决策模型**。
+架构是「Laya 本地模型打分 → 能看图的模型纠正」，**没有能看图的模型，纠正环节根本不存在**，
+用户拿到的就是实测判断力不合格的本地分（得体 vs 荒谬的面试穿搭综合分只差 0.4）。
+把视觉组放在决策组之前 = 让"先保证结论可用"这件事在版面上可见。
+
+**「视觉已就绪」的两条路径**（`visionReady`）
+
+| 路径 | 判据 | 状态标记 `vision-readiness` |
+|---|---|---|
+| 自己填 | `visionBaseUrl` 与 `visionModel` trim 后都非空 | 已就绪 |
+| 服务端已配 | 勾选 `vision-server-side`（`visionServerSide: true`，随 `od.config.v1` 持久化） | 服务端已配置 |
+| 都没有 | — | 未配置 |
+
+- 服务端开关的文案逐字：**能看图的模型已配在服务端（如本机 Laya 适配器），无需在此重复填写**；
+  副文案逐字：**勾选后若服务端其实没配置，结果页会提示「纠正未生效」——那说明这个开关该取消。**
+  本机 Laya 适配器（`tools/laya-adapter.mjs`）已在服务端 `.env.local` 配好视觉模型，
+  直连它的用户不该被逼在手机里再填一遍 Key；两条路径都真的解锁，**不是**二选一的死路。
+  勾错不会有别的即时反馈，所以把"退化时你会看到什么信号"直接写进副文案（结果页的
+  `reviewFailed` 旁注就是那个信号），而不是再加一道验证。
+- 状态标记配色只用既有令牌：`success #4F6B3C` on `surfaceAlt #EFE7DA` = 4.89:1（已就绪 / 服务端已配置），
+  `textDim #6B6154` on `surfaceAlt` = 4.94:1（未配置）——都过 AA 小字 4.5:1。
+
+**闸门按档位条件化**：`gateActive = needsVision && !visionReady`、`decisionLocked = gateActive && !decisionUnlocked`，
+其中 `needsVision = engineMode !== 'laya_only'`（与 `src/engine/orchestrator.js` 的运行时分档一致，
+未知档位在运行时按默认档处理）。
+
+| 档位 | 需要视觉模型 | 未配视觉时决策组 |
+|---|---|---|
+| `laya_only` | 否（不纠正、describe 走本地通道） | **不锁**，纯本地模式照常可用；视觉组挂着「当前档位用不到这一组」 |
+| `laya_review`（默认）/ `multimodal_only` | 是 | 默认锁住，直到视觉就绪**或用户显式临时解锁** |
+
+- **顺序要求不该以一整档不可用为代价**：`laya_only` 锁决策组是硬伤，所以闸门只在该档之外生效。
+- 切换档位立即生效：`laya_only → laya_review` 且视觉未配 → **立刻重新上锁**、提示块回来。
+
+**禁用必须能绕开**：视觉端点本身坏掉（Key 错 / 服务不通 / 模型下线）时，用户还得能配一个可用的决策模型，
+否则 App 变砖头——而那正是最需要配 fallback 的时候。所以提示块里给了显式临时解锁：
+
+| 动作 | testID | 文案 |
+|---|---|---|
+| 去配置（主推） | `decision-gate-jump` | 去配置 |
+| 仍然配置决策模型（逃生口） | `decision-gate-unlock` | 仍然配置决策模型 |
+| 恢复按顺序配置（解锁后） | `decision-gate-relock` | 恢复按顺序配置 |
+
+- 点 `decision-gate-unlock` → `onChangeConfig({ decisionUnlocked: true })`：决策组**立即解锁且可保存 Key**
+  （`od.apikey.v1` 必须真的落盘，这是被硬禁用挡掉的门禁路径）。
+- 解锁后 amber 提示块**换成弱说明** `decision-gate-unlocked-note`（`surfaceAlt` 底 + `border` 描边 +
+  `textDim` 字 4.94:1，不是警告语气）：**已解锁决策模型。没有能看图的模型时，你看到的只是本地模型的判断。**
+- `decisionUnlocked` 随 `od.config.v1` 持久化；视觉配好或勾了服务端时 `gateActive` 变 false，该标记**自动失效**
+  （公式直接把它旁路掉，不额外写回；若之后又把视觉清空，之前勾过的解锁会重新生效——这是公式的既定行为）。
+- 两条放行开关并存不冲突：`vision-server-side` 表达"服务端已配"（事实），`decisionUnlocked` 表达"我知道有风险，先配"（临时）。
+
+**需要用视觉模型的档位 + 未就绪 + 未临时解锁时，决策模型整组不可操作**
+
+- 输入框挂**真正的 `disabled` 属性**（不是只把颜色调灰）：`editable={false}` + `aria-disabled` +
+  `accessibilityState={{ disabled: true }}`，web 上再补 `disabled`（RN-web 的 TextInput 会把它透传到 `<input>`），
+  键盘与点击都改不动值。按钮与「决策模型来源」两张卡片同样 `disabled` + `aria-disabled`。
+- 禁用态**不降透明度**（55% 会把标签压到约 2.25:1，低于 AA）：输入框换 `surfaceAlt` 底 + `border` 描边 +
+  `textDim` 文字（4.94:1），按钮同理；决策组标题降为次级墨色（5.39:1）并挂一枚 `primarySoft` 底
+  `warn` 字的「未解锁」标记（`warn #8A5A12` on `primarySoft #F6E7CF` = 4.86:1）。选中的来源卡片也换成
+  `surfaceAlt`（`text` 字 13.48:1），否则墨色实心会看起来"还能点"。
+- 视觉区**不受影响、始终可编辑**（否则用户死锁在闸门里）。
+
+**闸门提示块**（`decision-gate-hint`，`primarySoft` 底 + `warn` 描边，复用视觉组提示样式，位于决策组正上方）
+
+> 先配好能看图的模型，再配决策模型。没有它，纠正环节不会生效，你看到的只是本地模型的判断。
+
+块内两个 44px 动作并排：`decision-gate-jump`（「去配置」，warn 描边）滚动到视觉区并聚焦 baseUrl，
+不让用户自己在长表单里找；`decision-gate-unlock`（「仍然配置决策模型」，中性描边 + 墨色字）是逃生口。
+视觉就绪即整块消失（不是常驻横幅）。
+
+**决策模型组副标题**：**负责打分。它在纠正之前运行，所以视觉模型要先配好。**
+
 ---
 
 ## 5. 移动端硬要求与做法

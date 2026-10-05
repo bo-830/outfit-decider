@@ -186,6 +186,41 @@ export function isDescribeRequest(items) {
     && items.every((item) => item && String(item.id).startsWith('describe_'));
 }
 
+/**
+ * 判断这次请求是不是**多模态纠正**（App 的 `review` 约定）。
+ *
+ * 为什么必须在这里识别：`visionServerSide` 形态下 App 没有自己的视觉端点，
+ * 商家把纠正指令 + 图片经决策通道发过来。若适配器认不出它，
+ * 就会把纠正请求当成"4 套 × 6 维打分"转发给 Laya，
+ * 结果既拿不到纠正分数（App 侧表现为 reviewFailed=parse），又白烧一遍打分算力。
+ * 实测就是踩了这个坑：3 组照片的纠正全部静默失败。
+ */
+export function isReviewRequest(items) {
+  return Array.isArray(items)
+    && items.length === 1
+    && items[0]
+    && String(items[0].id) === 'review';
+}
+
+/**
+ * 纠正请求 → 视觉端点消息。
+ *
+ * question 里带着 App 侧（`src/core/prompts.js` 的 REVIEW_SYSTEM_PROMPT + 用户上下文 +
+ * 六维口径 + 输出格式）拼好的**完整指令**，适配器不重复维护这份措辞（单一真源），
+ * 只负责把这段指令与图片一起送到视觉端点。
+ */
+export function buildReviewMessages(stateText, questionText) {
+  const instruction = (typeof questionText === 'string' && questionText.trim())
+    ? questionText.trim()
+    : (typeof stateText === 'string' ? stateText.trim() : '');
+  return [
+    {
+      role: 'user',
+      content: instruction || '请依据图片给出 6 个维度的分数，严格只输出规定的 JSON。',
+    },
+  ];
+}
+
 /* ────────────────────────── 响应翻译 ────────────────────────── */
 
 const round1 = (n) => Math.round(n * 10) / 10;
@@ -525,6 +560,73 @@ export function toAppBatchResponse(layaBody, lookIds) {
   };
 }
 
+/**
+ * 多模态纠正（`review` 请求）→ 调视觉端点，把模型给的 JSON 原样回给 App。
+ *
+ * 关键点：
+ *  - 指令由 App 侧拼好（含六维口径与"只输出 JSON"的约束），适配器只转发，不重复维护措辞；
+ *  - **图必须带上**：纠正是"以自己看到的画面重判"，没有图这一层就毫无意义；
+ *  - 未配置视觉端点时明确失败（502），绝不用 Laya 的打分冒充纠正结果——
+ *    那会让 App 以为纠正生效了（实测踩过：纠正请求被当成 6 维打分转发给 Laya）。
+ */
+async function handleReview(body) {
+  const question = body.questions[0];
+  const images = Array.isArray(body.images) ? body.images : [];
+  if (!VISION_BASE_URL) {
+    return { status: 502, payload: { error: { message: 'vision not configured' } } };
+  }
+  if (!images.length) {
+    return { status: 400, payload: { error: { message: 'review requires images' } } };
+  }
+  const messages = buildReviewMessages(body.state, question && question.question);
+  messages[0].content = [
+    { type: 'text', text: String(messages[0].content) },
+    ...images.map((image) => ({ type: 'image_url', image_url: { url: image.dataUri } })),
+  ];
+  const result = await fetchJson(
+    `${VISION_BASE_URL}/chat/completions`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(VISION_API_KEY ? { Authorization: `Bearer ${VISION_API_KEY}` } : {}),
+      },
+      body: JSON.stringify({
+        model: VISION_MODEL,
+        messages,
+        temperature: 0,
+        max_tokens: VISION_MAX_TOKENS,
+      }),
+    },
+    90000,
+  );
+  if (result.status < 200 || result.status >= 300 || !result.json) {
+    return { status: 502, payload: { error: { message: `vision upstream HTTP ${result.status}` } } };
+  }
+  const content = result.json.choices
+    && result.json.choices[0]
+    && result.json.choices[0].message
+    && result.json.choices[0].message.content;
+  const usage = result.json.usage || {};
+  return {
+    status: 200,
+    payload: {
+      model: VISION_MODEL,
+      answers: [{
+        id: 'review',
+        type: 'text',
+        content: typeof content === 'string' ? content : '',
+        confidence: 0.8,
+      }],
+      usage: {
+        prompt_tokens: toInt(usage.prompt_tokens),
+        completion_tokens: toInt(usage.completion_tokens),
+        total_tokens: toInt(usage.total_tokens),
+      },
+    },
+  };
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
@@ -613,9 +715,11 @@ const server = http.createServer(async (req, res) => {
     }
     const started = Date.now();
     try {
-      const result = isDescribeRequest(questions)
-        ? await handleDescribe(body)
-        : await (async () => {
+      const result = isReviewRequest(questions)
+        ? await handleReview(body)
+        : isDescribeRequest(questions)
+          ? await handleDescribe(body)
+          : await (async () => {
             const layaBody = toLayaRequest(body);
             const r = await fetchJson(`${UPSTREAM}/v1/systemone`, {
               method: 'POST',
