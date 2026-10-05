@@ -205,10 +205,23 @@ cmd /c "npm run laya"                                 # ② 协议适配器 0.0.
 ## 6. 门禁与"红得起"（防止假绿）
 
 ```
-cmd /c "npm test"        # = node --test "tests/**/*.test.js"  → 期望 89/0
+cmd /c "npm test"        # = node --test "tests/**/*.test.js"  → 期望 151/0
 cmd /c "npm run verify"  # = node tools/verify.mjs              → 期望 exit 0、12/12
 cmd /c "npm run gate"    # 两者串联
 ```
 
+> ⚠️ **跑 `verify.mjs` 之前必须先关掉自己的 Laya 服务（8000 / 8787）。**
+> 否则 App 的默认 baseUrl（`http://127.0.0.1:8787`）会命中**你那个真实适配器**，
+> 验收脚本的请求被它截走（例如 deep 报告请求拿到的是 Laya 的 score 答案），
+> 门禁会以一堆看不懂的方式**假红**——我为此白查了很久。
+> 关服务：`Get-NetTCPConnection -LocalPort 8787 -State Listen | % { Stop-Process -Id $_.OwningProcess -Force }`
+> （8000 同理）。verify 会自己拉起它需要的 mock。
+
 一个只会在顺境下变绿的门禁等于没有门禁。本项目的验证包含**故障注入路径**（401 / 超时 / 非 JSON / 空内容 / 部分失败），
 且 `artifacts/verify-report.json` 会明示本次故障注入走的是**真实 UI 路径**还是请求拦截，不允许"用拦截伪造通过"而不说明。
+
+### 6.1 设置页的"视觉先行"闸门与门禁的关系（§3.11c）
+
+设置页默认要求**先配能看图的模型**，之后决策模型组才可编辑。验收脚本不依赖外部视觉端点，
+所以它走的是 `decision-gate-unlock`「仍然配置决策模型」这条**显式临时解锁**路径（这也是那条自救路径的实战用例）。
+如果你改了闸门行为，记得同步 `tools/verify.mjs` 里那一步，否则 API Key 会存不进去、`keyPersisted` 变 false。
