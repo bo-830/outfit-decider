@@ -3,8 +3,9 @@
 > 本文件是并行开发的**唯一契约**。任何实现前必须先读本文件；实现与本文件冲突时，以本文件的签名为准；
 > 需要改契约时由 Lead 改本文件并提交，不得各自改代码后不回写契约。
 
-版本：v1.4（v1 = Phase 0 冻结；v1.1 新增 §2.1 三个设置页 testID 锚点；v1.2 修正门禁命令形式，见 §7.0；
-v1.3 修正 §3.7 describe 必须带图、§2.1 补 `ranked[].scores`；v1.4 §5.1 补齐自动重试口径与时间预期） · 适用范围：`src/core/**`、`src/data/**`、`src/engine/**`、`src/store/**`、
+版本：v1.5（v1 = Phase 0 冻结；v1.1 新增 §2.1 三个设置页 testID 锚点；v1.2 修正门禁命令形式，见 §7.0；
+v1.3 修正 §3.7 describe 必须带图、§2.1 补 `ranked[].scores`；v1.4 §5.1 补齐自动重试口径与时间预期；
+v1.5 新增 §3.9b 多模态纠正与 §3.9c 三档引擎模式） · 适用范围：`src/core/**`、`src/data/**`、`src/engine/**`、`src/store/**`、
 `src/ui/theme.js`、`src/components/**`、`src/screens/**`、`App.jsx`、`tools/**`、`tests/**`
 
 ---
@@ -158,6 +159,9 @@ export const BUILTIN_QUESTIONS = [
 | `testID="history-item"` / `testID="history-empty"` | 历史记录项 / 空态 |
 | `testID="engine-mode-jev"` / `"engine-mode-laya"` / `"btn-test-conn"` / `"test-conn-result"` | 设置页：模式切换 / 测试连接 / 结果 |
 | `testID="engine-model"` / `"engine-baseurl"` / `"engine-apikey"` | 设置页：模型名 / baseUrl / API Key 输入框（v1.1 新增，供 verify.mjs 走真实 UI 路径驱动异常场景；model 必须可自由输入任意字符串，不得做白名单或下拉限定） |
+| `testID="engine-mode-laya-only"` / `"engine-mode-laya-review"` / `"engine-mode-multimodal-only"` | 设置页：三档引擎模式切换（v1.5，§3.9c） |
+| `testID="engine-vision-baseurl"` / `"engine-vision-model"` / `"engine-vision-key"` | 设置页：多模态端点（describe 与纠正用），与决策模型分开配置 |
+| `testID="engine-badge"` | 结果页：本次结论来自哪一档引擎（文案见 §3.9c） |
 | `testID="probe-json"` | 隐藏节点（`<Text>` 或 `<div>`），内容 = `window.__OD_PROBE__` 的 JSON 序列化，供冒烟脚本读取 |
 | `window.__OD_PROBE__` | 运行状态探针：`{ ready, tab, looks, quick: {ranked: [{lookId, rank, overall, scores}]}, deep, errors: [], lastRequest: {...} | null, privacy: { imageInStorage: bool } }`。`ranked[].scores` 为 6 维分数（v1.3 补入契约，供冒烟脚本仅凭 probe 即可交叉校验；权威证据仍是线上响应 + DOM 的 6 行 `dim-row`） |
 
@@ -320,7 +324,6 @@ export function makeScoreSystem({ api, model })      // → { scoreLooks({artifa
 ```
 
 ### 3.9 `src/engine/deepSystem.js`
-
 ```js
 export function makeDeepSystem({ api, model })       // → { analyze({artifacts, userState, question, signal}): Promise<DeepReport> }
 // 一次调用（多模态：图片经 §4.3 的 images 通道传入），answers[0].type==='text'，content 为 JSON 字符串
@@ -337,11 +340,62 @@ export function deepReportSchema()                   // → 用于校验的字�
  * } */
 ```
 
+### 3.9b `src/engine/reviewSystem.js`（v1.5 新增 · 多模态纠正）
+
+**为什么要有它**：实测本机真实 Laya（见 `..\laya-service\README.md` §4）对穿搭的**判断力不达标**——
+「得体的面试穿搭」与「卡通卫衣+短裤+拖鞋+游泳帽」的综合分只差 0.4，且"场合适配度"方向是反的。
+但 Laya 作为**基础设施**是合格的（确定性、协议正确、离线、约 1s）。所以保留它当 System One 的打分引擎，
+再用一个**能看原图的**多模态模型去纠正它的分数。
+
+**关键设计约束**：纠正模型**必须直接看原图**，不能只看 `describe` 产出的文字描述——
+那份描述就是 Laya 打分的输入，只看文字等于继承同一个视觉来源，无法纠正视觉层面的误判。
+
+```js
+export function makeReviewSystem({ api, model })     // → { review({artifacts, descriptions, userState, question, base, signal}): Promise<QuickResult> }
+// 一次调用（多模态：全部图片经 §4.3 images 通道传入），answers[0].type==='text'，content 为 JSON 字符串
+export function parseReviewScores(rawText, lookIds)  // → { [lookId]: {overall_score,...} }（解析失败抛 {kind:'parse'}）
+export function buildReviewPrompt({ userState, question, base, lookIds })  // → string（纠正指令 + Laya 原始分）
+export function hasScoreDelta(base, reviewed, lookId)     // → bool：纠正是否真的改变了这套的分数
+```
+
+**纠正输出契约（`content` 必须是这个 JSON，禁止任何解释性文本）**：
+
+```json
+{ "scores": [ { "lookId": "look1",
+               "overall_score": 2.1, "aesthetic_score": 3.4, "scene_score": 1.8,
+               "figure_score": 3.0, "style_score": 2.6, "practical_score": 3.9 } ] }
+```
+
+- 规则：6 个维度全都必须给；0–5、保留 1 位小数；`lookId` 必须属于本次上传的套。
+- **允许推翻 Laya**：提示词明确要求"判断依据只能是你自己看到的画面"，
+  Laya 的分数只作为参考，不得为了让两者一致而妥协。
+- 返回类型仍是 `QuickResult`（§3.8 同构），因此排序、UI、历史、对比全部复用，不新增展示路径。
+
+### 3.9c 三档引擎模式（v1.5 新增）
+
+`DEFAULT_CONFIG.engineMode`：
+
+| 值 | 流程 | 何时用 |
+|---|---|---|
+| `laya_only` | 视觉模型 describe → Laya 打分 | 纯本地、不花钱；用于验证本地模型/离线场景 |
+| `laya_review`（**默认**） | describe → Laya 打分 → 多模态纠正 | 默认路径：结果最准，仍保留 Laya 在环 |
+| `multimodal_only` | 视觉模型 describe（仅展示用）→ 多模态直接打分，**不经过 Laya** | 对比两种判断、或本地模型不可用时 |
+
+- 三档都产出**同一个** `QuickResult` 形状，UI 与门禁不需要分支。
+- 结果页必须标注本次用的是哪一档（`testID="engine-badge"`），
+  因为同一套图在三档下可能给出不同分数，用户有权知道结论来自谁。
+- `laya_review` 下若纠正调用失败 → **回退**到 Laya 原始分，并置 `reviewFailed=true`
+  （不能让一次网络故障把用户已有结果清空）；`SET_WEAK` 与错误横幅照旧。
+- `reviewedAt` 与 `reviewModel` 记入 `QuickResult`，供历史与探针取证。
+
 ### 3.10 `src/engine/api.js`
 
 ```js
 export const DEFAULT_CONFIG = {
-  mode: 'jev',                        // 'jev' | 'laya'
+  mode: 'jev',                        // 'jev' | 'laya'（决策模型连接方式）
+  engineMode: 'laya_review',          // 'laya_only' | 'laya_review' | 'multimodal_only'（§3.9c）
+  visionBaseUrl: '',                  // 可选：OpenAI 兼容多模态端点（describe 与纠正用）
+  visionModel: '',                    // 可选：多模态模型名
   baseUrl: 'http://127.0.0.1:8787',
   askPath: '/ask', healthPath: '/health',
   model: 'outfit-judge-v1',
@@ -352,11 +406,17 @@ export function normalizeBaseUrl(url)   // → 去尾部 '/'；无 scheme 时补
 export function makeApi({ config, fetchImpl = globalThis.fetch })  // → Api
 /** Api = {
  *   ask({state, questions, images, timeoutMs, signal, model}): Promise<{model, answers, usage}>,
- *   health({timeoutMs, signal}): Promise<{ok: boolean, ms: number, detail: string}>
+ *   health({timeoutMs, signal}): Promise<{ok: boolean, ms: number, detail: string}>,
+ *   vision({state, questions, images, timeoutMs, signal}): Promise<{model, answers, usage}>   // v1.5：走 visionBaseUrl
  * } */
 export function classifyError(err)   // → {kind, message, action, retryable}
 export function redactConfig(config) // → 去掉 apiKey 的副本（写日志/报告前必须过这一层）
 ```
+
+> **多模态端点走独立通道**：`visionBaseUrl` / `visionModel` 与决策模型的 `baseUrl` **分开配置**，
+> 因为「谁看图」和「谁打分」在 `laya_review` 下是**两个不同的服务**。
+> 未配置 `visionBaseUrl` 时，`describe` 与纠正都不可用 → 该请求按 §5.1 报错并给出配置指引，
+> **不静默降级成假分数**。
 
 - `images` 通道：`images: [{id:'look1', dataUri}]`。**System One 的 describe 与 System Two 都会使用**（v1.2 修正，见 §3.7）：
   describe 只带当前一套（长度 1），System Two 带全部套；JEv/Laya 双方都接受该字段（mock 亦支持）。
@@ -454,6 +514,7 @@ mock 服务据 `images` 长度与 `state` 文本决定"看"到几套。
 | `rate_limit` | 429 | 请求太频繁了，歇一会儿再试 | 稍后重试 | 是（1 次，退避 2s） |
 | `server` | 5xx | 决策模型服务出错了，请稍后再试或检查本地模型日志 | 稍后重试 | 是（1 次） |
 | `parse` | 响应非 JSON / 缺字段 / 校验失败 | 模型返回的内容看不懂，请重试一次 | 重试 | 否 |
+| `vision_unconfigured` | `laya_review` 下未配置 `visionBaseUrl` / `visionModel` | **还没配置能看照片的模型，请到设置页填写多模态模型地址与模型名** | 去设置页 | 否 |
 | `invalid_input` | 图片无有效穿搭内容（描述全空或全为「未清晰显示」） | **无法识别有效穿搭内容，请上传清晰的穿搭照片哦** | 换图 | 否 |
 | `cancelled` | AbortController 主动取消 | （不展示，静默） | — | 否 |
 

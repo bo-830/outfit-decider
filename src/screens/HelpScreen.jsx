@@ -11,15 +11,15 @@ const STEPS = [
   },
   {
     title: '2 · 填进设置页',
-    body: '回到「设置」→ 服务地址，baseUrl 填 http://192.168.1.5:8787，askPath 一般是 /ask，healthPath 一般是 /health。',
+    body: '回到「设置」→ 决策模型地址，baseUrl 填 http://192.168.1.5:8787，askPath 一般是 /ask，healthPath 一般是 /health。',
   },
   {
     title: '3 · 选 Laya 本地模式',
-    body: '引擎模式切到「Laya 本地」，这样请求不会带 API Key，也不会走公网。',
+    body: '决策模型来源切到「Laya 本地」，这样请求不会带 API Key，也不会走公网。',
   },
   {
     title: '4 · 点一次连接测试',
-    body: '设置页的「测试连接」会请求 healthPath。显示连接成功就说明这台手机和服务在同一张网里。',
+    body: '设置页的「决策模型连接测试」会请求 healthPath。显示连接成功就说明这台手机和服务在同一张网里。',
   },
   {
     title: '5 · 连不上时按顺序排查',

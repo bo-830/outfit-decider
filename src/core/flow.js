@@ -118,6 +118,17 @@ export function flowReducer(state, action) {
           ranked: Array.isArray(action.ranked) ? action.ranked : [],
           usage: action.usage || null,
           model: action.model || null,
+          // SPEC §3.9c：结论来源必须随结果一起留存，**不能**在渲染时读当前配置——
+          // 用户跑完再改设置档位，旧结果就会被错误地标成新档位（等于说谎）。
+          engineMode: action.engineMode || null,
+          reviewModel: action.reviewModel || null,
+          reviewedAt: action.reviewedAt || null,
+          // 纠正失败时 §3.9c 约定回退到 Laya 原分，界面必须能如实说明这一点
+          reviewFailed: action.reviewFailed === true,
+          reviewErrorKind: action.reviewErrorKind || null,
+          // orchestrator 用 reviewChanged，界面层可能叫 reviewChange；两个都收，避免命名漂移
+          reviewChanged: action.reviewChanged || action.reviewChange || null,
+          reviewFailedLooks: action.reviewFailedLooks || null,
         },
         error: null,
       };

@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 
 import {
   DEFAULT_CONFIG,
+  ENGINE_MODES,
   classifyError,
   makeApi,
   normalizeBaseUrl,
@@ -18,6 +19,13 @@ const QUESTIONS = [{ id: 'overall_score', type: 'score', question: '打分' }];
 test('DEFAULT_CONFIG 与 SPEC §3.10 逐字一致', () => {
   assert.deepEqual(DEFAULT_CONFIG, {
     mode: 'jev',
+    // v1.5 §3.9c：三档引擎模式与独立的多模态通道
+    engineMode: 'laya_review',
+    visionBaseUrl: '',
+    visionModel: '',
+    visionApiKey: '',
+    visionTimeoutMs: 60000,
+    visionMaxTokens: 4000,
     baseUrl: 'http://127.0.0.1:8787',
     askPath: '/ask',
     healthPath: '/health',
@@ -26,6 +34,11 @@ test('DEFAULT_CONFIG 与 SPEC §3.10 逐字一致', () => {
     timeoutMs: 45000,
     quickTimeoutMs: 20000,
   });
+});
+
+test('默认引擎模式是 laya_review（§3.9c：保留 Laya 在环，但由多模态纠正）', () => {
+  assert.equal(DEFAULT_CONFIG.engineMode, 'laya_review');
+  assert.deepEqual(ENGINE_MODES, ['laya_only', 'laya_review', 'multimodal_only']);
 });
 
 test('normalizeBaseUrl：补 scheme、去尾斜杠、兼容局域网写法', () => {

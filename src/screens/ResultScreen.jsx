@@ -5,6 +5,7 @@ import { selectRankedLooks } from '../core/flow.js';
 import { colors, font, HIT, layout, radius, space } from '../ui/theme';
 import { SANS } from '../ui/platform';
 import EmptyState from '../components/EmptyState.jsx';
+import EngineBadge from '../components/EngineBadge.jsx';
 import ErrorBanner from '../components/ErrorBanner.jsx';
 import NameplateRow from '../components/NameplateRow.jsx';
 import ProgressCard from '../components/ProgressCard.jsx';
@@ -28,6 +29,7 @@ export default function ResultScreen({
   onRetry,
   staleHint = false,
   onRerun,
+  engineMode = null,
 }) {
   const insets = useSafeAreaInsets();
   const ranked = selectRankedLooks(flow);
@@ -35,6 +37,19 @@ export default function ResultScreen({
   const focusLookId = expandedLookId || (ranked[0] ? ranked[0].lookId : null);
   const deepReports = flow.deep || {};
   const scoredCount = ranked.filter((look) => look.overall !== null && look.overall !== undefined).length;
+
+  /**
+   * SPEC §3.9c · 结论来源标注。
+   * 权威来源是**这次运行**的 flow.quick.engineMode（跑完再改设置也不会把历史结论说错）；
+   * engineMode prop 只作为引擎尚未回报时的兜底，两者都没有就如实写「未标注」。
+   */
+  const quick = flow.quick || null;
+  const usedEngineMode = (quick && quick.engineMode) || engineMode || null;
+  const reviewChange = quick ? quick.reviewChange || quick.reviewChanged || null : null;
+  const reviewApplied =
+    !!quick &&
+    quick.reviewFailed !== true &&
+    (Array.isArray(reviewChange) ? reviewChange.length > 0 : !!reviewChange);
 
   return (
     <ScrollView
@@ -56,6 +71,16 @@ export default function ResultScreen({
         />
       ) : null}
       {running ? <ProgressCard stage={flow.phase === 'deep_running' ? 'deep' : 'scoring'} done={0} total={artifacts.length} /> : null}
+
+      {quick ? (
+        <EngineBadge
+          mode={usedEngineMode}
+          reviewFailed={quick.reviewFailed === true}
+          reviewErrorKind={quick.reviewErrorKind || null}
+          reviewApplied={reviewApplied}
+          onGoSettings={onGoSettings}
+        />
+      ) : null}
 
       {staleHint ? (
         <View testID="stale-hint" style={styles.stale}>

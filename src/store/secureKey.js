@@ -15,6 +15,8 @@ import * as SecureStore from 'expo-secure-store';
 
 /** AsyncStorage / SecureStore 共用的键名 */
 export const KEY_STORAGE = 'od.apikey.v1';
+/** v1.5：多模态端点（describe 与纠正用）的 Key 单独一个键，与决策模型的 Key 互不影响 */
+export const VISION_KEY_STORAGE = 'od.visionkey.v1';
 
 const IS_WEB = Platform.OS === 'web';
 
@@ -79,15 +81,71 @@ export async function loadApiKey() {
 
 /** 清除 API Key（两处都清）→ Promise<void> */
 export async function clearApiKey() {
+  await clearStoredKey(KEY_STORAGE);
+}
+
+/* ── v1.5：多模态端点的 Key（与决策模型的 Key 分开存） ───────────────── */
+
+/** 保存多模态 Key → Promise<{key, secure}>；语义与 saveApiKey 完全一致。 */
+export async function saveVisionKey(key) {
+  return saveStoredKey(VISION_KEY_STORAGE, key);
+}
+
+/** 读取多模态 Key → Promise<{key, secure}>。 */
+export async function loadVisionKey() {
+  return loadStoredKey(VISION_KEY_STORAGE);
+}
+
+/** 清除多模态 Key → Promise<void>。 */
+export async function clearVisionKey() {
+  await clearStoredKey(VISION_KEY_STORAGE);
+}
+
+/** 通用：安全存储可用就写钥匙串，否则降级 AsyncStorage 明文。 */
+async function saveStoredKey(storageKey, key) {
+  const value = normalize(key);
+  if (await isSecureStorageAvailable()) {
+    try {
+      if (value) await SecureStore.setItemAsync(storageKey, value);
+      else await SecureStore.deleteItemAsync(storageKey);
+      await AsyncStorage.removeItem(storageKey).catch(() => {});
+      return { key: value, secure: true };
+    } catch {
+      // 安全存储写失败 → 降级
+    }
+  }
+  if (value) await AsyncStorage.setItem(storageKey, value);
+  else await AsyncStorage.removeItem(storageKey);
+  return { key: value, secure: false };
+}
+
+async function loadStoredKey(storageKey) {
+  if (await isSecureStorageAvailable()) {
+    try {
+      const key = await SecureStore.getItemAsync(storageKey);
+      if (typeof key === 'string' && key) return { key, secure: true };
+    } catch {
+      // 读失败 → 尝试降级存储
+    }
+  }
+  try {
+    const key = await AsyncStorage.getItem(storageKey);
+    return { key: typeof key === 'string' ? key : '', secure: false };
+  } catch {
+    return { key: '', secure: false };
+  }
+}
+
+async function clearStoredKey(storageKey) {
   try {
     if (!IS_WEB && SecureStore && typeof SecureStore.deleteItemAsync === 'function') {
-      await SecureStore.deleteItemAsync(KEY_STORAGE);
+      await SecureStore.deleteItemAsync(storageKey);
     }
   } catch {
     // 忽略：安全存储不可用时无需清除
   }
   try {
-    await AsyncStorage.removeItem(KEY_STORAGE);
+    await AsyncStorage.removeItem(storageKey);
   } catch {
     // 忽略：本来就没有
   }
@@ -95,8 +153,12 @@ export async function clearApiKey() {
 
 export default {
   KEY_STORAGE,
+  VISION_KEY_STORAGE,
   saveApiKey,
   loadApiKey,
   clearApiKey,
+  saveVisionKey,
+  loadVisionKey,
+  clearVisionKey,
   isSecureStorageAvailable,
 };

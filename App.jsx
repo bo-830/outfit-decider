@@ -15,7 +15,7 @@ import { invalidInputError } from './src/data/copy.js';
 import { classifyError, DEFAULT_CONFIG, makeApi, normalizeBaseUrl } from './src/engine/api.js';
 import { makeOrchestrator } from './src/engine/orchestrator.js';
 import { appendHistory, clearHistory, loadHistory, makeHistoryRecord, removeHistory } from './src/store/history.js';
-import { isSecureStorageAvailable, loadApiKey, saveApiKey } from './src/store/secureKey.js';
+import { isSecureStorageAvailable, loadApiKey, loadVisionKey, saveApiKey, saveVisionKey } from './src/store/secureKey.js';
 import CaptureScreen from './src/screens/CaptureScreen.jsx';
 import HistoryScreen from './src/screens/HistoryScreen.jsx';
 import HelpScreen from './src/screens/HelpScreen.jsx';
@@ -27,7 +27,11 @@ import { colors } from './src/ui/theme.js';
 const IS_WEB = Platform.OS === 'web';
 /** 非机密配置（服务地址 / 模型 / 模式）另存一份，API Key 只走 secureKey.js */
 const CONFIG_KEY = 'od.config.v1';
-const PERSISTED_CONFIG_KEYS = ['mode', 'baseUrl', 'askPath', 'healthPath', 'model', 'timeoutMs', 'quickTimeoutMs'];
+const PERSISTED_CONFIG_KEYS = [
+  'mode', 'baseUrl', 'askPath', 'healthPath', 'model', 'timeoutMs', 'quickTimeoutMs',
+  // v1.5 SPEC §3.9c：三档引擎模式与多模态端点也必须持久化，否则每次重启都退回默认档
+  'engineMode', 'visionBaseUrl', 'visionModel', 'visionTimeoutMs',
+];
 
 /**
  * 探针里的 lastRequest 只放元信息：模型、路径、套号、问题 id、模式、真实耗时。
@@ -100,6 +104,9 @@ export default function App() {
   const [conn, setConn] = useState(null);
   const [testing, setTesting] = useState(false);
   const [keySecure, setKeySecure] = useState(false);
+  // v1.5：多模态端点的独立连通性状态
+  const [visionConn, setVisionConn] = useState(null);
+  const [testingVision, setTestingVision] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   /** 上一次跑分用的条件快照：条件改了旧分数仍显示，但提示可以重跑 */
   const [ranSignature, setRanSignature] = useState(null);
@@ -119,9 +126,11 @@ export default function App() {
       makeOrchestrator({
         api,
         model: config.model,
+        // SPEC §3.9c：三档模式在每次运行时都要生效，所以这里必须跟着 config 重建
+        engineMode: config.engineMode,
         onWeakNet: () => dispatch({ type: 'SET_WEAK', flag: true }),
       }),
-    [api, config.model],
+    [api, config.model, config.engineMode],
   );
 
   /* ── 启动：读配置 / API Key / 历史 ───────────────────────── */
@@ -148,6 +157,14 @@ export default function App() {
         if (alive) setKeySecure(secure);
       } catch {
         /* 读不到 Key 就当没配 */
+      }
+      // v1.5：多模态端点的 Key 与决策模型的 Key **分开存**（两者是不同供方，
+      // 换掉其中一个不该影响另一个）。同样不进 CONFIG_KEY 那个 JSON 里。
+      try {
+        const vision = await loadVisionKey();
+        if (vision.key && alive) setConfig((prev) => ({ ...prev, visionApiKey: vision.key }));
+      } catch {
+        /* 读不到就当没配 */
       }
       try {
         const list = await loadHistory(AsyncStorage);
@@ -260,7 +277,19 @@ export default function App() {
         },
       });
 
-      dispatch({ type: 'QUICK_DONE', ranked: result.ranked, usage: result.usage, model: result.model });
+      dispatch({
+        type: 'QUICK_DONE',
+        ranked: result.ranked,
+        usage: result.usage,
+        model: result.model,
+        // SPEC §3.9c：把"结论来自哪一档"随结果一起存进 flow，供结果页如实标注
+        engineMode: result.engineMode || null,
+        reviewModel: result.reviewModel || null,
+        reviewedAt: result.reviewedAt || null,
+        reviewFailed: result.reviewFailed === true,
+        reviewErrorKind: result.reviewErrorKind || null,
+        reviewChanged: result.reviewChanged || null,
+      });
       if (result.weakNetwork) dispatch({ type: 'SET_WEAK', flag: true });
       setRanSignature({
         state: stateSummary(current.userState),
@@ -386,6 +415,14 @@ export default function App() {
           ranked: rankLooks(merged),
           usage: current.quick?.usage || null,
           model: current.quick?.model || null,
+          // SPEC §3.9c：单套重试只换了这一套的分数，其余套的来源信息必须原样保留，
+          // 否则重试一次就把结果页的"结论来源"标注抹掉了。
+          engineMode: current.quick?.engineMode || result.engineMode || null,
+          reviewModel: current.quick?.reviewModel || null,
+          reviewedAt: current.quick?.reviewedAt || null,
+          reviewFailed: current.quick?.reviewFailed === true,
+          reviewErrorKind: current.quick?.reviewErrorKind || null,
+          reviewChanged: current.quick?.reviewChanged || null,
         });
       } catch (err) {
         const info = classifyError(err);
@@ -474,6 +511,32 @@ export default function App() {
     setConfig((prev) => ({ ...prev, apiKey: saved.key }));
   }, []);
 
+  // v1.5：多模态端点的 Key 独立保存（不同供方，换一个不该影响另一个）
+  const saveVision = useCallback(async (key) => {
+    const saved = await saveVisionKey(key);
+    setConfig((prev) => ({ ...prev, visionApiKey: saved.key }));
+  }, []);
+
+  /** 多模态端点的连通性测试：走 visionBaseUrl 的最小真实请求。 */
+  const testVision = useCallback(async () => {
+    setTestingVision(true);
+    try {
+      const started = Date.now();
+      await api.vision({
+        system: '只回复 ok 两个字符。',
+        content: 'ping',
+        answerId: 'ping',
+        temperature: 0,
+      });
+      setVisionConn({ ok: true, ms: Date.now() - started, detail: '已连通' });
+    } catch (err) {
+      const info = classifyError(err);
+      setVisionConn({ ok: false, ms: 0, detail: info.message });
+    } finally {
+      setTestingVision(false);
+    }
+  }, [api]);
+
   const testConnection = useCallback(async () => {
     setTesting(true);
     try {
@@ -527,7 +590,16 @@ export default function App() {
       ready,
       tab,
       looks: (flow.artifacts || []).map((item) => item.lookId),
-      quick: { ranked },
+      quick: {
+        ranked,
+        // SPEC §3.9c：探针要能证明"本次结论来自哪一档、纠正是否生效"，
+        // 否则门禁只能靠 DOM 文案推断。只放元信息，绝不放图片或 Key。
+        engineMode: flow.quick?.engineMode || null,
+        reviewModel: flow.quick?.reviewModel || null,
+        reviewFailed: flow.quick?.reviewFailed === true,
+        reviewErrorKind: flow.quick?.reviewErrorKind || null,
+        reviewChanged: flow.quick?.reviewChanged || null,
+      },
       deep,
       errors,
       lastRequest,
@@ -624,6 +696,10 @@ export default function App() {
         testing={testing}
         keySecure={keySecure}
         onSaveKey={saveKey}
+        onSaveVisionKey={saveVision}
+        onTestVision={testVision}
+        visionConn={visionConn}
+        testingVision={testingVision}
         onOpenHelp={() => setShowHelp(true)}
       />
     );

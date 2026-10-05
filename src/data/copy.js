@@ -65,6 +65,14 @@ export const ERRORS = {
     retryable: false,
     silent: false,
   },
+  // v1.5：laya_review 需要「能看图的模型」，而它是独立于决策模型的另一条通道。
+  // 未配置时不能说成"网络问题"，否则用户会去查网线。必须直接指向配置项。
+  vision_unconfigured: {
+    message: '还没配置能看照片的模型，请到设置页填写多模态模型地址与模型名',
+    action: '去设置页',
+    retryable: false,
+    silent: false,
+  },
   invalid_input: {
     message: '无法识别有效穿搭内容，请上传清晰的穿搭照片哦',
     action: '换图',

@@ -676,6 +676,82 @@ export function createMockServer() {
       return;
     }
 
+    /**
+     * SPEC §3.9b 的多模态通道对端：OpenAI 兼容的 /chat/completions。
+     * 让 laya_review 档的「纠正」步骤能**离线**被端到端验收，不必每次烧真模型的额度。
+     * 输出严格遵守纠正契约：只回 {"scores":[...]} 这一个 JSON，没有解释文字。
+     */
+    if (req.method === 'POST' && url.pathname === '/chat/completions') {
+      let body;
+      try {
+        body = JSON.parse(await readBody(req));
+      } catch {
+        sendJson(res, 400, { error: { message: 'invalid json body' } });
+        return;
+      }
+      const model = typeof body.model === 'string' && body.model ? body.model : 'mock-vision';
+
+      if (model === 'test-vision-fail') {
+        sendJson(res, 500, { error: { message: 'vision upstream failed' } });
+        return;
+      }
+      if (model === 'test-vision-garbage') {
+        sendJson(res, 200, {
+          model,
+          choices: [{ message: { content: '抱歉，我无法完成这个请求。' } }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        });
+        return;
+      }
+
+      // 从 user content 里把 lookId 抠出来（content 可能是数组，第一项是 text）
+      const userMessage = Array.isArray(body.messages)
+        ? body.messages.find((m) => m && m.role === 'user')
+        : null;
+      const rawContent = userMessage ? userMessage.content : '';
+      const promptText = Array.isArray(rawContent)
+        ? rawContent.filter((part) => part && part.type === 'text').map((part) => part.text).join('\n')
+        : String(rawContent || '');
+      const imageParts = Array.isArray(rawContent)
+        ? rawContent.filter((part) => part && part.type === 'image_url')
+        : [];
+      const lookIds = [...new Set(promptText.match(/look[1-4]/g) || [])].sort();
+
+      // 关键：**故意把分数与 Laya 的原始分拉开**，这样门禁才能证明「纠正真的生效了」，
+      // 而不是"纠正返回什么都没人看"。分数仍然确定性（同输入同输出）且自洽
+      // （overall 由 5 维加权得来），避免出现「综合 5.0 / 美观 2.8」那种自相矛盾。
+      const rows = lookIds.map((lookId) => {
+        const dims = SCORE_DIMENSION_IDS.filter((id) => id !== 'overall_score');
+        const scores = {};
+        for (const id of dims) {
+          // 用与 Laya 不同的种子前缀，保证两套引擎的数不一样
+          scores[id] = deterministicScore(`review|${lookId}|${id}`);
+        }
+        // 权重按产品意图：场合适配度最高（与 System One 的口径一致，避免两个引擎方向相反）
+        const weights = {
+          aesthetic_score: 0.22, scene_score: 0.34, figure_score: 0.18, style_score: 0.14, practical_score: 0.12,
+        };
+        const overall = dims.reduce((sum, id) => sum + scores[id] * weights[id], 0);
+        scores.overall_score = Math.round(overall * 10) / 10;
+        // 按固定顺序输出（overall 在最前），保证线上字段顺序稳定
+        // 注意：SCORE_DIMENSION_IDS 只含 5 个非 overall 维度，必须显式补上 overall
+        const ordered = {};
+        for (const id of ['overall_score', ...dims]) ordered[id] = scores[id];
+        return { lookId, ...ordered };
+      });
+      sendJson(res, 200, {
+        model,
+        choices: [{ message: { role: 'assistant', content: JSON.stringify({ scores: rows }) } }],
+        usage: {
+          prompt_tokens: Math.max(1, promptText.length),
+          completion_tokens: 40 + rows.length * 20,
+          total_tokens: Math.max(1, promptText.length) + 40 + rows.length * 20,
+        },
+        mock: { imageCount: imageParts.length, lookIds },
+      });
+      return;
+    }
+
     if (req.method === 'POST' && url.pathname === '/ask') {
       let body;
       try {

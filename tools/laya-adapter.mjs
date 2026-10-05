@@ -42,6 +42,39 @@
  */
 
 import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+/**
+ * 加载项目根的 `.env.local`（已 gitignore，绝不入库）。
+ * 真实进程环境变量**优先**——这样部署时可以用环境变量覆盖文件里的值。
+ * 没有这个加载器，就必须靠启动脚本export一堆变量，很容易出现
+ * 「明明配了却说没配」的排查成本。
+ */
+function loadLocalEnv() {
+  try {
+    const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+    const file = path.join(root, '.env.local');
+    if (!fs.existsSync(file)) return {};
+    const out = {};
+    for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eq = trimmed.indexOf('=');
+      if (eq <= 0) continue;
+      out[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1).trim();
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+const LOCAL_ENV = loadLocalEnv();
+const env = (name) => (process.env[name] !== undefined && process.env[name] !== ''
+  ? process.env[name]
+  : LOCAL_ENV[name]);
 
 const argv = process.argv.slice(2);
 function argValue(name, fallback) {
@@ -49,14 +82,15 @@ function argValue(name, fallback) {
   return i >= 0 && argv[i + 1] ? argv[i + 1] : fallback;
 }
 
-const UPSTREAM = (argValue('upstream', process.env.LAYA_UPSTREAM || 'http://127.0.0.1:8000')).replace(/\/+$/, '');
-const PORT = Number(argValue('port', process.env.LAYA_ADAPTER_PORT || 8787));
-const HOST = argValue('host', process.env.LAYA_ADAPTER_HOST || '0.0.0.0');
-const UPSTREAM_KEY = process.env.LAYA_API_KEY || '';
-const MODEL = process.env.LAYA_MODEL || '';
-const VISION_BASE_URL = (process.env.VISION_BASE_URL || '').replace(/\/+$/, '');
-const VISION_API_KEY = process.env.VISION_API_KEY || '';
-const VISION_MODEL = process.env.VISION_MODEL || '';
+const UPSTREAM = (argValue('upstream', env('LAYA_UPSTREAM') || 'http://127.0.0.1:8000')).replace(/\/+$/, '');
+const PORT = Number(argValue('port', env('LAYA_ADAPTER_PORT') || 8787));
+const HOST = argValue('host', env('LAYA_ADAPTER_HOST') || '0.0.0.0');
+const UPSTREAM_KEY = env('LAYA_API_KEY') || '';
+const MODEL = env('LAYA_MODEL') || '';
+const VISION_BASE_URL = (env('VISION_BASE_URL') || '').replace(/\/+$/, '');
+const VISION_API_KEY = env('VISION_API_KEY') || '';
+const VISION_MODEL = env('VISION_MODEL') || '';
+const VISION_MAX_TOKENS = Number(env('VISION_MAX_TOKENS') || 4000);
 
 const SCORE_MIN = 0;
 const SCORE_MAX = 5;
@@ -377,7 +411,7 @@ async function handleDescribe(body) {
         'Content-Type': 'application/json',
         ...(VISION_API_KEY ? { Authorization: `Bearer ${VISION_API_KEY}` } : {}),
       },
-      body: JSON.stringify({ model: VISION_MODEL, messages, temperature: 0.2 }),
+      body: JSON.stringify({ model: VISION_MODEL, messages, temperature: 0.2, max_tokens: VISION_MAX_TOKENS }),
     },
     60000,
   );

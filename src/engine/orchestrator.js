@@ -8,16 +8,24 @@
 // （now / weakThresholdMs / onWeakNet），便于用假时钟确定性测试弱网；不传时行为不变。
 
 import { makeDeepSystem } from './deepSystem.js';
+import { makeReviewSystem } from './reviewSystem.js';
 import { makeScoreSystem } from './scoreSystem.js';
 import { makeVisionEngine } from './vision.js';
+import { rankLooks } from '../core/protocol.js';
 import { isMeaningfulDescription } from '../core/scoring.js';
+import { relevantScoreDimensions } from '../core/prompts.js';
 import { invalidInputError } from '../data/copy.js';
 
 const DEFAULT_WEAK_THRESHOLD_MS = 6000;
 
+/** SPEC §3.9c 三档引擎模式。 */
+export const ENGINE_MODES = ['laya_only', 'laya_review', 'multimodal_only'];
+const DEFAULT_ENGINE_MODE = 'laya_review';
+
 export function makeOrchestrator({
   api,
   model,
+  engineMode = DEFAULT_ENGINE_MODE,
   concurrency = 4,
   now = Date.now,
   weakThresholdMs = DEFAULT_WEAK_THRESHOLD_MS,
@@ -25,7 +33,9 @@ export function makeOrchestrator({
 } = {}) {
   const vision = makeVisionEngine({ api, model });
   const scorer = makeScoreSystem({ api, model });
+  const reviewer = makeReviewSystem({ api, model });
   const deepEngine = makeDeepSystem({ api, model });
+  const mode = ENGINE_MODES.includes(engineMode) ? engineMode : DEFAULT_ENGINE_MODE;
 
   let weakNetwork = false;
   let timeoutStreak = 0;
@@ -103,20 +113,136 @@ export function makeOrchestrator({
       throw invalidInput();
     }
 
-    notify(onProgress, { stage: 'scoring', done: 0, total });
-    const quick = await scorer.scoreLooks({
-      artifacts: list,
-      descriptions,
-      userState,
-      question,
-      signal,
-      onProgress: ({ done: scored, total: scoringTotal }) => {
-        notify(onProgress, { stage: 'scoring', done: scored, total: scoringTotal });
-      },
-    });
+    // SPEC §3.9c 分档：
+    //   multimodal_only → **完全不经过 Laya 打分**（describe 只为展示客观记录）
+    //   laya_only       → 只用 Laya 原分
+    //   laya_review     → Laya 打分后再由多模态纠正
+    let quick;
+    if (mode === 'multimodal_only') {
+      notify(onProgress, { stage: 'scoring', done: 0, total });
+      quick = await applyJudgment({
+        quick: null,
+        list,
+        descriptions,
+        userState,
+        question,
+        signal,
+        onProgress,
+      });
+      notify(onProgress, { stage: 'scoring', done: total, total });
+    } else {
+      notify(onProgress, { stage: 'scoring', done: 0, total });
+      quick = await scorer.scoreLooks({
+        artifacts: list,
+        descriptions,
+        userState,
+        question,
+        signal,
+        onProgress: ({ done: scored, total: scoringTotal }) => {
+          notify(onProgress, { stage: 'scoring', done: scored, total: scoringTotal });
+        },
+      });
+
+      if (mode === 'laya_review') {
+        notify(onProgress, { stage: 'reviewing', done: 0, total: 1 });
+        quick = await applyJudgment({
+          quick,
+          list,
+          descriptions,
+          userState,
+          question,
+          signal,
+          onProgress,
+        });
+        notify(onProgress, { stage: 'reviewing', done: 1, total: 1 });
+      }
+    }
 
     for (const failure of quick.failures || []) noteOutcome(failure.kind);
-    return { ...quick, weakNetwork };
+    return { ...quick, engineMode: mode, weakNetwork };
+  }
+
+  /**
+   * SPEC §3.9c · 用多模态模型给出（或纠正）6 维分数。
+   *
+   * `laya_review`：以 Laya 的原始分为**参考**重新判断，纠正失败则回退原分（不能因一次故障清空用户结果）。
+   * `multimodal_only`：完全不用 Laya，直接由多模态模型给分（describe 仍用于展示客观记录）。
+   */
+  async function applyJudgment({ quick, list, descriptions, userState, question, signal, onProgress }) {
+    // multimodal_only 进门时 quick 为 null（还没打过 Laya）
+    const base = mode === 'laya_review' ? quick : null;
+    try {
+      const reviewed = await reviewer.review({
+        artifacts: list, descriptions, userState, question, base, signal,
+      });
+      if (mode === 'multimodal_only') {
+        // 全量替换：连"哪几套参与评估"都以多模态结果为准
+        const scoresByLook = new Map(Object.entries(reviewed.scores));
+        const rows = list
+          .filter((item) => scoresByLook.has(item.lookId))
+          .map((item) => ({ lookId: item.lookId, scores: scoresByLook.get(item.lookId) }));
+        if (!rows.length) throw invalidInput();
+        return {
+          ...rebuildQuick({ rows, descriptions, question, previous: quick || {} }),
+          model: reviewed.model,
+          usage: reviewed.usage,
+          reviewModel: reviewed.model,
+          reviewedAt: reviewed.reviewedAt,
+          reviewedLooks: Object.keys(reviewed.scores),
+          reviewChanged: Object.keys(reviewed.scores),
+        };
+      }
+      return {
+        ...mergeReviewedScores({ quick, reviewed, descriptions, question }),
+        reviewModel: reviewed.model,
+        reviewedAt: reviewed.reviewedAt,
+        reviewedLooks: Object.keys(reviewed.scores),
+        reviewChanged: reviewed.changed,
+      };
+    } catch (err) {
+      // 纠正失败不清空已有结果；弱网/错误分类照旧上报，由 UI 决定怎么提示
+      noteOutcome(err && err.kind);
+      if (typeof onProgress === 'function') {
+        onProgress({ stage: 'reviewing', done: 1, total: 1, failed: true, kind: (err && err.kind) || 'server' });
+      }
+      // 没有可回退的分数时（multimodal_only）必须如实报错
+      if (!quick) throw err;
+      return { ...quick, reviewFailed: true, reviewErrorKind: (err && err.kind) || 'server' };
+    }
+  }
+
+  /** 用纠正后的分数重建整份 QuickResult（排序、overall、置信度、relevance 全部重算）。 */
+  function mergeReviewedScores({ quick, reviewed, descriptions, question }) {
+    const rows = quick.ids.map((lookId) => {
+      const next = reviewed.scores[lookId];
+      const previous = quick.byLook[lookId] || { scores: {}, confidences: {} };
+      return { lookId, scores: next || previous.scores, confidences: previous.confidences };
+    });
+    return rebuildQuick({ rows, descriptions, question, previous: quick });
+  }
+
+  function rebuildQuick({ rows, descriptions, question, previous }) {
+    const relevance = relevantScoreDimensions({
+      builtinId: question && question.builtinId ? question.builtinId : null,
+      text: question && typeof question.text === 'string' ? question.text : '',
+    });
+    const ranked = rankLooks(rows.map((row) => ({ ...row, relevance: [...relevance] }))).map((row) => ({
+      lookId: row.lookId,
+      rank: row.rank,
+      overall: row.scores.overall_score,
+      scores: row.scores,
+      confidences: row.confidences || {},
+      relevance: row.relevance,
+    }));
+    const byLook = {};
+    for (const row of rows) byLook[row.lookId] = { scores: row.scores, confidences: row.confidences || {} };
+    return {
+      ...previous,
+      ranked,
+      byLook,
+      ids: rows.map((row) => row.lookId),
+      descriptions: { ...(previous.descriptions || {}), ...(descriptions || {}) },
+    };
   }
 
   /** SPEC §3.9 · System Two 一次多模态调用。 */

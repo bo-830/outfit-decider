@@ -89,9 +89,58 @@ test('RUN_QUICK_START / SET_DESCRIPTIONS / QUICK_DONE 的阶段推进', () => {
   assert.deepEqual(described.descriptions, { look1: '整体风格：简约' });
   const done = reduce(described, { type: 'QUICK_DONE', ranked: RANKED, usage: { total_tokens: 9 }, model: 'm1' });
   assert.equal(done.phase, 'quick_done');
-  assert.deepEqual(done.quick, { ranked: RANKED, usage: { total_tokens: 9 }, model: 'm1' });
+  assert.deepEqual(done.quick, {
+    ranked: RANKED,
+    usage: { total_tokens: 9 },
+    model: 'm1',
+    // v1.5 §3.9c：结论来源字段必须随结果留存，未提供时显式落 null/false
+    engineMode: null,
+    reviewModel: null,
+    reviewedAt: null,
+    reviewFailed: false,
+    reviewErrorKind: null,
+    reviewChanged: null,
+    reviewFailedLooks: null,
+  });
   const tolerant = reduce(described, { type: 'QUICK_DONE' });
-  assert.deepEqual(tolerant.quick, { ranked: [], usage: null, model: null });
+  assert.equal(tolerant.quick.ranked.length, 0);
+  assert.equal(tolerant.quick.usage, null);
+  assert.equal(tolerant.quick.model, null);
+  assert.equal(tolerant.quick.engineMode, null);
+  assert.equal(tolerant.quick.reviewFailed, false, '缺字段时不得是 undefined（界面要能直接读）');
+});
+
+test('QUICK_DONE：引擎档位与纠正状态随结果留存，供结果页如实标注（§3.9c）', () => {
+  const done = reduce(initialFlowState, {
+    type: 'QUICK_DONE',
+    ranked: RANKED,
+    usage: null,
+    model: 'laya',
+    engineMode: 'laya_review',
+    reviewModel: 'deepseek-flash',
+    reviewedAt: 1700000000000,
+    reviewFailed: false,
+    reviewChanged: ['look1', 'look2'],
+  });
+  assert.equal(done.quick.engineMode, 'laya_review');
+  assert.equal(done.quick.reviewModel, 'deepseek-flash');
+  assert.equal(done.quick.reviewedAt, 1700000000000);
+  assert.deepEqual(done.quick.reviewChanged, ['look1', 'look2']);
+
+  // 纠正失败：必须记下原因，界面才能说明"显示的是本地模型判断"
+  const failed = reduce(initialFlowState, {
+    type: 'QUICK_DONE',
+    ranked: RANKED,
+    engineMode: 'laya_review',
+    reviewFailed: true,
+    reviewErrorKind: 'vision_unconfigured',
+  });
+  assert.equal(failed.quick.reviewFailed, true);
+  assert.equal(failed.quick.reviewErrorKind, 'vision_unconfigured');
+
+  // 界面层可能叫 reviewChange；两个名字都要收，避免命名漂移丢数据
+  const alias = reduce(initialFlowState, { type: 'QUICK_DONE', ranked: RANKED, reviewChange: ['look3'] });
+  assert.deepEqual(alias.quick.reviewChanged, ['look3']);
 });
 
 test('RUN_QUICK_START 重新跑会清掉旧 deep，RUN_DEEP_START 保留 quick', () => {

@@ -14,6 +14,16 @@ const AUTO_RETRY_DELAY_MS = 600;
 
 export const DEFAULT_CONFIG = {
   mode: 'jev',
+  // SPEC §3.9c 三档引擎模式：laya_only ｜ laya_review（默认）｜ multimodal_only
+  engineMode: 'laya_review',
+  // 多模态端点与决策模型**分开配置**：laya_review 下「谁看图」和「谁打分」是两个不同的服务。
+  visionBaseUrl: '',
+  visionModel: '',
+  visionApiKey: '',
+  visionTimeoutMs: 60000,
+  // 推理模型的输出预算。太小 → reasoning 吃光 → content 空串（HTTP 200），
+  // 会被误判成 parse 失败。纠正一次要给 N 套 × 6 维分数，留足余量。
+  visionMaxTokens: 4000,
   baseUrl: 'http://127.0.0.1:8787',
   askPath: '/ask',
   healthPath: '/health',
@@ -22,6 +32,9 @@ export const DEFAULT_CONFIG = {
   timeoutMs: 45000,
   quickTimeoutMs: 20000,
 };
+
+/** SPEC §3.9c 合法取值（UI 与校验共用，避免两处硬编码漂移）。 */
+export const ENGINE_MODES = ['laya_only', 'laya_review', 'multimodal_only'];
 
 const HEALTH_TIMEOUT_MS = 8000;
 const REDACTED_API_KEY = '***';
@@ -190,7 +203,132 @@ export function makeApi({ config, fetchImpl = globalThis.fetch } = {}) {
     }
   }
 
-  return { ask, health };
+  /**
+   * SPEC §3.9b/§3.10 · 多模态通道：走 visionBaseUrl 的 OpenAI 兼容 `/chat/completions`。
+   *
+   * 为什么单独一条通道而不是复用 ask()：ask() 面对的是决策模型（Laya/JEv），它的
+   * questions/answers 是数组式 JSON；而"看图"这件事的行业事实标准是 OpenAI 的
+   * chat/completions（system + user[text, image_url]）。把两者混成一条通道会逼着用户
+   * 去写一个把 chat 协议翻译成决策协议的中间件——那正是我们想避免的负担。
+   *
+   * 返回值统一成 {model, answers:[{id,type:'text',content,confidence}], usage}，
+   * 因此 vision.js / reviewSystem.js 不需要知道底下是哪家 API。
+   */
+  async function visionOnce(request = {}) {
+    const cfg = settings();
+    const doFetch = resolveFetch();
+    const base = normalizeBaseUrl(cfg.visionBaseUrl);
+    if (!doFetch) throw apiError('network');
+    if (!base) throw apiError('vision_unconfigured');
+
+    const { messages, images, timeoutMs, signal, model } = request;
+    const requestModel = typeof model === 'string' && model ? model : cfg.visionModel;
+    if (!requestModel) throw apiError('vision_unconfigured');
+
+    const content = buildVisionContent(request.content, images);
+    const payload = {
+      model: requestModel,
+      messages: Array.isArray(messages) && messages.length
+        ? messages
+        : [
+            { role: 'system', content: request.system || '' },
+            { role: 'user', content },
+          ],
+      temperature: Number.isFinite(request.temperature) ? request.temperature : 0.2,
+      // 推理模型（deepseek-flash / v4-pro 这类）会先消耗 reasoning_tokens，
+      // max_tokens 给小了会出现「HTTP 200 但 content 是空串」——看起来像模型没回答，
+      // 实际是推理把预算吃光了。所以预算必须给足，且不能依赖服务端默认值。
+      max_tokens: Number.isFinite(request.maxTokens) ? request.maxTokens : cfg.visionMaxTokens,
+    };
+
+    const headers = { 'Content-Type': 'application/json' };
+    const key = typeof cfg.visionApiKey === 'string' ? cfg.visionApiKey.trim() : '';
+    if (key) headers.Authorization = `Bearer ${key}`;
+
+    const url = `${base}/chat/completions`;
+    const gate = createAbortGate(
+      signal,
+      Number.isFinite(timeoutMs) ? timeoutMs : cfg.visionTimeoutMs,
+    );
+    try {
+      let response;
+      try {
+        response = await doFetch(url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(payload),
+          signal: gate.signal,
+        });
+      } catch (err) {
+        throw normalizeFailure(err, gate);
+      }
+      const status = Number(response && response.status);
+      const ok = response && typeof response.ok === 'boolean'
+        ? response.ok
+        : Number.isFinite(status) && status >= 200 && status < 300;
+      if (!ok) throw apiError(statusKind(status), { status: Number.isFinite(status) ? status : 0 });
+
+      let data;
+      try {
+        data = await response.json();
+      } catch {
+        throw gate.timedOut ? apiError('timeout') : apiError('parse');
+      }
+      const choice = data && Array.isArray(data.choices) ? data.choices[0] : null;
+      const text = choice && choice.message && typeof choice.message.content === 'string'
+        ? choice.message.content
+        : '';
+      if (!text) throw apiError('parse');
+      const usage = (data && data.usage) || {};
+      return {
+        model: (data && typeof data.model === 'string' && data.model) || requestModel,
+        answers: [{ id: request.answerId || 'vision', type: 'text', content: text, confidence: 0.8 }],
+        usage: {
+          prompt_tokens: toTokenCount(usage.prompt_tokens),
+          completion_tokens: toTokenCount(usage.completion_tokens),
+          total_tokens: toTokenCount(usage.total_tokens),
+        },
+      };
+    } finally {
+      gate.cleanup();
+    }
+  }
+
+  /** vision 通道同样按 §5.1 自动重投 1 次（可重试错误）。 */
+  async function vision(request = {}) {
+    let lastError = null;
+    for (let attempt = 0; attempt <= AUTO_RETRY_MAX; attempt += 1) {
+      try {
+        return await visionOnce(request);
+      } catch (err) {
+        lastError = err;
+        const retryable = err && err.retryable === true && err.kind !== 'cancelled';
+        if (!retryable || attempt === AUTO_RETRY_MAX) throw err;
+        if (request.signal && request.signal.aborted) throw apiError('cancelled');
+        const delay = Number.isFinite(err.retryDelayMs) ? err.retryDelayMs : AUTO_RETRY_DELAY_MS;
+        await sleep(delay, request.signal);
+        if (request.signal && request.signal.aborted) throw apiError('cancelled');
+      }
+    }
+    throw lastError || apiError('server');
+  }
+
+  return { ask, health, vision };
+}
+
+/** 把文本 + 图片组装成 OpenAI 多模态 content 数组（无图时退化为纯文本，兼容纯文本端点）。 */
+function buildVisionContent(text, images) {
+  const list = normalizeImages(images);
+  const body = typeof text === 'string' ? text : '';
+  if (!list.length) return body;
+  return [
+    { type: 'text', text: body },
+    ...list.map((image) => ({ type: 'image_url', image_url: { url: image.dataUri } })),
+  ];
+}
+
+function toTokenCount(value) {
+  return Number.isFinite(value) ? Math.trunc(value) : 0;
 }
 
 /** SPEC §3.10 · 统一错误分类 → {kind, message, action, retryable}（message 只来自 copy，绝不回显原始错误）。 */

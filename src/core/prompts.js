@@ -96,6 +96,77 @@ export const DEEP_USER_TEMPLATE = [
   '请按系统指令要求的 JSON 结构输出报告。',
 ].join('\n');
 
+/* ─────────────── SPEC §3.9b · 多模态纠正（System One 的分数校正） ─────────────── */
+
+export const REVIEW_SYSTEM_PROMPT = [
+  '你是一位严格的穿搭评审。你会**直接看到**用户上传的穿搭照片，并拿到一个本地决策模型给出的分数。',
+  '',
+  '你的任务只有一个：给出你自己对这 6 个维度的判断分数。',
+  '',
+  '硬性要求：',
+  '1. **判断依据只能是你自己看到的画面**与用户给出的上下文。本地模型的分数仅供参考，',
+  '   它是通用决策模型、不是穿搭评审模型，允许你大幅推翻它。',
+  '2. 不要为了与本地模型保持一致而妥协；如果它的判断明显不合理，就按你的判断给分。',
+  '3. 只依据照片里看得见的内容和用户说过的信息作答。',
+  '   绝不臆测用户未提及的身材数据、职业、年龄、收入或场合。',
+  '4. 六个维度都必须给分，取值 0-5，保留 1 位小数。',
+  '5. **只输出一个 JSON 对象**（不要 markdown 代码块、不要任何前后缀、不要任何解释文字），结构如下：',
+  '{',
+  '  "scores": [',
+  '    { "lookId": "look1",',
+  '      "overall_score": 2.1, "aesthetic_score": 3.4, "scene_score": 1.8,',
+  '      "figure_score": 3.0, "style_score": 2.6, "practical_score": 3.9 }',
+  '  ]',
+  '}',
+  '',
+  '各维度口径：',
+  '- overall_score：综合来看，这一套对这位用户今天要出门的场合，整体得体吗？',
+  '- aesthetic_score：这一套搭配看起来好看吗？',
+  '- scene_score：这一套适合在这个场合穿吗？',
+  '- figure_score：这一套穿上身后，身形看起来利落、比例好吗？',
+  '- style_score：这一套的单品之间风格统一吗？',
+  '- practical_score：这一套在这个场合穿着方便、省心吗？',
+].join('\n');
+
+/**
+ * 构造纠正提示词：用户上下文 + 问题 + 本地模型原始分 + 输出要求。
+ * 原始分必须写进提示词（纠正是"以本地分为参考的重新判断"，不是盲评）。
+ */
+export function buildReviewPrompt({ userState, question, base, lookIds, descriptions } = {}) {
+  const summary = userState ? stateSummary(userState) : '';
+  const note = userState && typeof userState.note === 'string' ? userState.note.trim() : '';
+  const lines = [];
+
+  lines.push(`用户上下文：${summary || '（未提供）'}`);
+  if (note) lines.push(`用户补充：${note}`);
+  lines.push(`用户的问题：${(question && question.text) || '（未提供）'}`);
+  lines.push('');
+
+  const ids = Array.isArray(lookIds) ? lookIds : [];
+  lines.push('本地决策模型的原始判断（仅供参考，可推翻）：');
+  for (const lookId of ids) {
+    const index = lookIndex(lookId);
+    const row = base && base.byLook ? base.byLook[lookId] : null;
+    const scores = (row && row.scores) || {};
+    const parts = SCORE_QUESTION_IDS
+      .map((id) => {
+        const value = scores[id];
+        return `${SCORE_DIMENSION_LABELS[id]}=${Number.isFinite(value) ? value.toFixed(1) : '无'}`;
+      })
+      .join('，');
+    lines.push(`第 ${index} 套（${lookId}）：${parts}`);
+    // 附上客观描述，帮助模型对齐"这一套是哪一套"；但判断必须以画面为准
+    const described = descriptions && descriptions[lookId];
+    if (typeof described === 'string' && described.trim()) {
+      lines.push(`  该套的客观记录：${renderDescription(described)}`);
+    }
+  }
+
+  lines.push('');
+  lines.push(`请对上面这 ${ids.length} 套各给出 6 个维度的分数，严格只输出上面规定的那一个 JSON 对象。`);
+  return lines.join('\n');
+}
+
 /** SPEC §3.7 · 图片描述问题，长度恒为 1。 */
 export function buildDescribeQuestions(lookId) {
   const index = lookIndex(lookId);
