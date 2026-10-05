@@ -66,8 +66,9 @@ src/data/      options 枚举真源 · copy 全部中文文案
 src/screens/   上传 / 结果 / 对比 / 历史 / 设置 / 引导
 src/components/ 结果卡、刻度尺、星级、报告卡、横幅等
 src/store/     history 仅存文字与分数 · secureKey API Key 本地存储
-tests/         8 个测试文件 · 562 条断言 · 纯 node:test（无 jest）
-tools/         mock-jev-server 契约对端 · verify 验收门禁 · make-fixtures 夹具生成
+tests/         10 个测试文件 · 117 个用例 · 纯 node:test（无 jest）
+tools/         mock-jev-server 契约对端 · laya-adapter 真实 Laya 适配器 · verify 验收门禁
+               laya-{eval,choice-eval,order-eval,chain-eval} Laya 判断力评估 · make-fixtures 夹具生成
 fixtures/      结构化描述与 deep 报告样例（黄金样例）
 docs/          SPEC（唯一真源）/ DESIGN / RUNBOOK
 ```
@@ -76,9 +77,10 @@ docs/          SPEC（唯一真源）/ DESIGN / RUNBOOK
 
 | 门禁 | 命令 | 结果 |
 |---|---|---|
-| 纯逻辑单测 | `node --test "tests/**/*.test.js"` | **96 / 96 pass，0 fail** |
+| 纯逻辑单测 | `node --test "tests/**/*.test.js"` | **117 / 117 pass，0 fail** |
 | 全链路验收 | `node tools/verify.mjs` | **exit 0，12 / 12 断言 + 2 / 2 附加门禁通过** |
 | mock 契约自检 | `node tools/mock-selfcheck.mjs` | **30 / 30 pass**（不需要浏览器） |
+| Laya 真实模型评估 | `node tools/laya-chain-eval.mjs` | 见下方「真实 Laya 的实测限制」 |
 | 真机（Expo Go + 局域网） | `npx expo start --lan` | 见 RUNBOOK §1（需人工扫码） |
 
 `node tools/verify.mjs` 覆盖的 12 条断言（逐条对应 SPEC §7）：mock 可达（含 `contractSpec` 防冒充）· System One 结构与 1 位小数 ·
@@ -102,7 +104,34 @@ docs/          SPEC（唯一真源）/ DESIGN / RUNBOOK
 3. **不向第三方上报**：除你在设置页配置的 baseUrl 之外，App 不发任何出网请求（无埋点、无遥测）。
 4. Laya 本地模式的数据交互只发生在你的局域网内。
 
-## 7. mock 的诚实声明
+## 8. 真实 Laya 的实测限制（重要，别跳过）
+
+本机已装好真实的 Laya 决策模型（PyPI `laya` 0.3.27，部署在 `..\laya-service\`），
+`laya.serve` 自称实现的正是 **TypeSafe Jev `/v1/systemone`** 协议 —— 需求里的 JEv 与 Laya 是同一套协议的两个面。
+
+**基础设施层面全部通过**：协议正确、确定性（同输入同输出）、离线、约 1s 往返、`answer_confidence` 语义正确。
+
+**但它的判断力实测不合格。** 用 App 的真实请求形状（经 `tools/laya-adapter.mjs`）测「明显得体」vs「明显荒谬」
+两套穿搭在正式面试场景下的分数差（`node tools/laya-chain-eval.mjs`）：
+
+| 维度 | 得体 | 荒谬（卡通卫衣+运动短裤+拖鞋+游泳帽） | 差值 |
+|---|---|---|---|
+| overall_score | 1.90 | 1.50 | **+0.40 偏弱** |
+| scene_score | 3.40 | 3.60 | **−0.20 方向错** |
+| figure_score | 3.30 | 3.30 | **0.00 无差异** |
+
+平均 `answer_confidence` 只有 0.40 —— 模型自己也不确定。
+另外三组评估（`laya-eval` / `laya-choice-eval` / `laya-order-eval`）显示：档位文案微调能让 overall 从 3.58 摆到 2.75；
+三选一里重复选到同一个位置 4/4；同档次之间的两两比较**不传递**。
+
+**结论**：Laya 适合当**基础设施**（确定性、可离线、可拒绝"都不合适"——这一条它 0.98 置信度敢说），
+**不适合当"哪套最好"的权威排序依据**。它是在客服/工单类决策上训练的通用决策模型，
+不是时尚评审模型；官方微调手册也承认预训练检查点在自建领域上只有 0.362 准确率。
+要可信的穿搭判断，用 System Two 那条多模态大模型的路。详见 `..\laya-service\README.md` §4。
+
+---
+
+## 9. mock 的诚实声明
 
 `tools/mock-jev-server.mjs` 是**测试替身**：分数由 `lookId + state` 的 FNV-1a 哈希按维度生成，**不代表任何真实穿搭评价**，
 也不会真的"看懂"照片（描述文案读自 `fixtures/descriptions/*.json`）。

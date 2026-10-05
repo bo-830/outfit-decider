@@ -77,6 +77,37 @@ cmd /c "npx expo start --lan"
 | model | 逐字透传给服务端，**不做白名单**（异常场景靠它触发，见 §4） |
 | API Key | 仅 JEv 模式使用；存 `expo-secure-store`（原生）。**Web 端降级存 AsyncStorage，界面会明确提示明文风险** |
 
+### 2.0 接本机已部署的 Laya（实测可用，含一个必须知道的限制）
+
+本机已装好真实的 Laya 决策模型（不是 mock）：
+
+```powershell
+# ① 决策模型（laya-serve，监听 0.0.0.0:8000；加载约 30–60s）
+C:\博830\vibecoding\laya-service\start-laya.cmd
+
+# ② 协议适配器（App 契约 8787 → Laya 契约 8000；同时补上 Laya 缺失的 CORS）
+cd C:\博830\vibecoding\outfit-decider
+cmd /c "npm run laya"
+```
+
+设置页填：
+
+| 字段 | 值 |
+|---|---|
+| 引擎模式 | **Laya 本地** |
+| baseUrl | `http://127.0.0.1:8787`（手机填电脑局域网 IP，如 `http://192.168.1.4:8787`） |
+| askPath / healthPath | `/ask` / `/health`（默认值即可） |
+| model | 留空或随意；适配器让 Laya 自己路由检查点 |
+
+**为什么不能把 baseUrl 直接指向 8000**：① 协议形状不同（Laya 的 `questions`/`answers` 是对象、
+字段叫 `instructions`/`criteria`）；② `laya-serve` 不返回 CORS 头，浏览器端会被同源策略拦掉。
+适配器（`tools/laya-adapter.mjs`，17 条翻译单测）同时解决这两件事。
+
+> ⚠️ **务必读** `C:\博830\vibecoding\laya-service\README.md` §4：
+> 本机 Laya 的**判断力实测不合格**（得体穿搭 vs 荒谬穿搭的综合分差只有 0.4，且"场合适配度"方向是反的）。
+> 它作为**基础设施**完全可用（确定性、协议正确、离线、约 1s），但**不适合作为"哪套最好"的权威排序依据**。
+> 复现命令：`node tools/laya-chain-eval.mjs`。
+
 ### 2.1 Laya 本地模型：分步部署引导（首次使用时应看到同一份内容）
 
 1. **在你打算长期开着的那台电脑上**部署 Laya 决策模型（可以就是你现在这台）。
@@ -103,7 +134,16 @@ cmd /c "npx expo start --lan"
 ```json
 {"model":"...","answers":[{"id":"overall_score","type":"score","score":4.3,"content":"","confidence":0.86}],"usage":{...}}
 ```
-要么让你的服务端按这个形状回，**要么把 `tools/mock-jev-server.mjs` 当成参考实现改**——它已经是本契约的对端。
+
+**三种对端，按需要选一个：**
+
+| 对端 | 用途 | 启动 |
+|---|---|---|
+| `tools/mock-jev-server.mjs` | 测试替身（分数是哈希造的，6 种故障注入），跑验收门禁用 | `node tools/mock-jev-server.mjs` |
+| `tools/laya-adapter.mjs` | 接**真实** Laya 决策模型（翻译 + CORS） | `cmd /c "npm run laya"`（需先起 laya-serve） |
+| 你自己的服务端 | 直接按上面的形状实现 | — |
+
+要自己实现，要么按这个形状回，**要么把 `tools/mock-jev-server.mjs` 当参考实现改**——它已经是本契约的对端。
 
 ---
 

@@ -13,6 +13,8 @@
     "export:web": "expo export --platform web",
     "test": "node --test \"tests/**/*.test.js\"",
     "mock": "node tools/mock-jev-server.mjs",
+    "laya": "node tools/laya-adapter.mjs",
+    "eval:laya": "node tools/laya-eval.mjs && node tools/laya-choice-eval.mjs && node tools/laya-order-eval.mjs",
     "verify": "node tools/verify.mjs",
     "gate": "node --test \"tests/**/*.test.js\" && node tools/verify.mjs"
   },
