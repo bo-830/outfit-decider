@@ -59,11 +59,25 @@ async function runQuickWithCapture() {
 
 test('System One 输出零解释文本：score answer 只有 id/type/score/confidence', async () => {
   const { responses } = await runQuickWithCapture();
-  const scoreResponses = responses.filter((entry) => entry.body.questions.every((item) => item.type === 'score'));
-  assert.equal(scoreResponses.length, 4, '应有 4 次 System One 打分调用');
-  for (const entry of scoreResponses) {
-    assert.ok(entry.payload.answers.length > 0);
-    for (const answer of entry.payload.answers) {
+  // v1.6 起打分走批处理：一次 /ask/batch 的 payload.looks[] 里才有各套的 answers。
+  // 这里把它摊平成"每个套一份答案"，后面沿用同一套校验。
+  const scoreAnswers = [];
+  for (const entry of responses) {
+    const isBatch = String(entry.url).endsWith('/ask/batch');
+    if (isBatch) {
+      for (const look of entry.payload.looks || []) {
+        scoreAnswers.push({ label: `batch:${look.lookId}`, answers: look.answers });
+      }
+      continue;
+    }
+    if (Array.isArray(entry.body.questions) && entry.body.questions.every((item) => item.type === 'score')) {
+      scoreAnswers.push({ label: 'single', answers: entry.payload.answers });
+    }
+  }
+  assert.equal(scoreAnswers.length, 4, '4 套都应有一份打分答案（批处理）');
+  for (const entry of scoreAnswers) {
+    assert.ok(entry.answers.length > 0, `${entry.label} 应有答案`);
+    for (const answer of entry.answers) {
       assert.equal(answer.type, 'score');
       assert.deepEqual(
         Object.keys(answer).sort(),
@@ -85,18 +99,24 @@ test('System One 输出零解释文本：score answer 只有 id/type/score/confi
 
 test('System One 输出零解释文本：请求里没有任何 text 型问题，结果对象没有解释性键', async () => {
   const { quick, requests } = await runQuickWithCapture();
-  // 只看真正的打分请求：describe 请求也带 overall_score 的评分口径说明，
-  // 所以必须用「不含 describe_* 问题」来区分（v1.5 起 describe 不再走这条通道）
-  const scoreRequests = requests.filter(
-    (call) => Array.isArray(call.body.questions)
+  // v1.6 起打分走批处理：一次 /ask/batch 覆盖 4 套，而不是 4 次 /ask。
+  const batchRequests = requests.filter((call) => String(call.url).endsWith('/ask/batch'));
+  assert.equal(batchRequests.length, 1, '4 套打分应合并为一次批处理请求');
+  assert.equal(batchRequests[0].body.looks.length, 4);
+
+  const perLookScoreRequests = requests.filter(
+    (call) => String(call.url).endsWith('/ask')
+      && Array.isArray(call.body.questions)
       && call.body.questions.some((item) => item.id === 'overall_score')
       && !call.body.questions.some((item) => String(item.id).startsWith('describe_')),
   );
-  assert.equal(scoreRequests.length, 4);
-  for (const call of scoreRequests) {
-    assert.equal(call.body.questions.length, 6);
-    assert.ok(call.body.questions.every((item) => item.type === 'score'), 'System One 只允许 score 型问题');
-    assert.ok(!call.body.questions.some((item) => item.type === 'text'), 'System One 不得夹带文字型问题');
+  assert.equal(perLookScoreRequests.length, 0, '批处理可用时不应再有逐条打分请求');
+
+  // 请求形状：每套都必须问齐 6 个 score 型问题，且不得夹带 text 型问题
+  for (const look of batchRequests[0].body.looks) {
+    assert.deepEqual(look.questions.map((item) => item.id), SCORE_QUESTION_IDS);
+    assert.ok(look.questions.every((item) => item.type === 'score'), 'System One 只允许 score 型问题');
+    assert.ok(!look.questions.some((item) => item.type === 'text'), 'System One 不得夹带文字型问题');
   }
 
   const output = {

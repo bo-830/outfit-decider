@@ -3,9 +3,9 @@
 > 本文件是并行开发的**唯一契约**。任何实现前必须先读本文件；实现与本文件冲突时，以本文件的签名为准；
 > 需要改契约时由 Lead 改本文件并提交，不得各自改代码后不回写契约。
 
-版本：v1.5（v1 = Phase 0 冻结；v1.1 新增 §2.1 三个设置页 testID 锚点；v1.2 修正门禁命令形式，见 §7.0；
-v1.3 修正 §3.7 describe 必须带图、§2.1 补 `ranked[].scores`；v1.4 §5.1 补齐自动重试口径与时间预期；
-v1.5 新增 §3.9b 多模态纠正与 §3.9c 三档引擎模式） · 适用范围：`src/core/**`、`src/data/**`、`src/engine/**`、`src/store/**`、
+版本：v1.6（v1 = Phase 0 冻结；v1.1 §2.1 三个设置页 testID；v1.2 §7.0 门禁命令形式；
+v1.3 §3.7 describe 必须带图、§2.1 `ranked[].scores`；v1.4 §5.1 重试口径与时间预期；
+v1.5 §3.9b 多模态纠正、§3.9c 三档引擎模式；v1.6 §3.11b 批处理打分、§3.11c 设置页配置顺序） · 适用范围：`src/core/**`、`src/data/**`、`src/engine/**`、`src/store/**`、
 `src/ui/theme.js`、`src/components/**`、`src/screens/**`、`App.jsx`、`tools/**`、`tests/**`
 
 ---
@@ -161,6 +161,8 @@ export const BUILTIN_QUESTIONS = [
 | `testID="engine-model"` / `"engine-baseurl"` / `"engine-apikey"` | 设置页：模型名 / baseUrl / API Key 输入框（v1.1 新增，供 verify.mjs 走真实 UI 路径驱动异常场景；model 必须可自由输入任意字符串，不得做白名单或下拉限定） |
 | `testID="engine-mode-laya-only"` / `"engine-mode-laya-review"` / `"engine-mode-multimodal-only"` | 设置页：三档引擎模式切换（v1.5，§3.9c） |
 | `testID="engine-vision-baseurl"` / `"engine-vision-model"` / `"engine-vision-key"` | 设置页：多模态端点（describe 与纠正用），与决策模型分开配置 |
+| `testID="vision-server-side"` / `"vision-readiness"` | 设置页（v1.6）：视觉模型已配在服务端 / 就绪状态标记 |
+| `testID="decision-gate-hint"` / `"decision-gate-jump"` | 设置页（v1.6）：决策模型的配置闸门提示与跳转（视觉未就绪时禁用决策组） |
 | `testID="engine-badge"` | 结果页：本次结论来自哪一档引擎（文案见 §3.9c） |
 | `testID="probe-json"` | 隐藏节点（`<Text>` 或 `<div>`），内容 = `window.__OD_PROBE__` 的 JSON 序列化，供冒烟脚本读取 |
 | `window.__OD_PROBE__` | 运行状态探针：`{ ready, tab, looks, quick: {ranked: [{lookId, rank, overall, scores}]}, deep, errors: [], lastRequest: {...} | null, privacy: { imageInStorage: bool } }`。`ranked[].scores` 为 6 维分数（v1.3 补入契约，供冒烟脚本仅凭 probe 即可交叉校验；权威证据仍是线上响应 + DOM 的 6 行 `dim-row`） |
@@ -436,6 +438,44 @@ export function makeOrchestrator({ api, model, concurrency = 4 })   // → Orche
 // 再调 scoreSystem（onProgress({stage:'scoring', done, total})）。
 // 全部套都无法识别 → 抛 {kind:'invalid_input', message: copy.UNRECOGNIZABLE}（§5.1 文案）
 ```
+
+### 3.11b 批处理打分（v1.6 新增）
+
+**动机**：`scoreSystem` 原本对每套发一次 `/ask`（4 套 = 4 次往返）。Laya 的
+`/v1/systemone/batch` 能在**单次 forward pass** 内 collate 多行，因此值得合并。
+
+```js
+// src/engine/api.js
+api.askBatch({ looks: [{ lookId, state, questions }], timeoutMs?, signal? })
+//   → POST {baseUrl}{askPath}/batch   body {model, looks:[{lookId, state, questions}]}
+//   → {model, looks:[{lookId, model, answers, usage}], usage}
+```
+
+规则：
+- **一次请求覆盖全部可打分的套**；`api.askBatch` 不存在或整批失败时**自动回退逐条并行**（并发上限 4）。
+  回退是必需的：对端可能不支持批处理（旧 mock、第三方实现），一处不兼容不该拖垮整轮评分。
+- 探测代价：对端没有该路由时会先吃一个 404（实测 1 次额外往返）。这是自知成本，不是缺陷。
+- 只有 ≥2 套可打分时才批处理（1 套时批处理没有意义）。
+- **批处理不得改变结论**：Laya 保证 `results` 与 `states` 同序；适配器按索引回填 `lookId`，
+  且**校验条数**——条数不符直接报错，绝不把结果错配到别的穿上（错配比失败更糟）。
+- 描述为空的套不进入批处理（不发请求，直接判 `invalid_input`）。
+
+**实测取舍（必须如实记录）**：本机 CPU 上串行 3745ms vs 批处理 3508ms，**加速比仅 1.07x**
+（`tools/laya-batch-eval.mjs`）。瓶颈是 Laya 的 CPU 算力，不是 HTTP 往返。
+批处理**不改变分数**（4/4 逐条一致），所以在 GPU 或多并发下才是净收益。
+**在代码注释与 README 里都不要把它说成"大幅提速"。**
+
+### 3.11c 设置页的配置顺序（v1.6 新增）
+
+**先配「能看图的模型」，再配「决策模型」**。理由：`laya_review` 架构下没有视觉模型就没有纠正，
+用户拿到的正是实测判断力不合格的本地分（见 §3.9b）。所以视觉组在决策组之前，
+且视觉未就绪时**决策组整体禁用**。
+
+- 「已就绪」判据：`visionBaseUrl` 与 `visionModel` 均非空（trim 后）**或** `visionServerSide === true`。
+- `visionServerSide`（`DEFAULT_CONFIG`）用于**直连本机 Laya 适配器**的场景：
+  适配器已用自己的 `.env.local` 在服务端配好视觉模型，用户不应被迫在手机里重复填 Key。
+  该开关只影响设置页闸门，不改变运行时行为。
+- 新增锚点：`decision-gate-hint`、`decision-gate-jump`、`vision-server-side`、`vision-readiness`。
 
 ### 3.12 `src/store/history.js`
 

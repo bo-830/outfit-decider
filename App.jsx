@@ -31,6 +31,9 @@ const PERSISTED_CONFIG_KEYS = [
   'mode', 'baseUrl', 'askPath', 'healthPath', 'model', 'timeoutMs', 'quickTimeoutMs',
   // v1.5 SPEC §3.9c：三档引擎模式与多模态端点也必须持久化，否则每次重启都退回默认档
   'engineMode', 'visionBaseUrl', 'visionModel', 'visionTimeoutMs',
+  // v1.6：直连本机 Laya 适配器时，视觉模型已配在服务端，用户无需在手机上重复填写。
+  // 这个开关只影响设置页的"可否配置决策模型"闸门，不改变运行时行为。
+  'visionServerSide',
 ];
 
 /**

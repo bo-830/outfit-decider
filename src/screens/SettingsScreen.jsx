@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ENGINE_MODES } from '../engine/api.js';
@@ -28,16 +28,46 @@ const ENGINE_MODE_ROWS = {
 
 const DEFAULT_ENGINE_MODE = 'laya_review';
 
-function Field({ label, meta, value, onChangeText, testID, placeholder, keyboardType, secure, multiline }) {
+/**
+ * 锁定态必须是**真的不可操作**，而不是只把颜色调灰：
+ *   - `accessibilityState={{ disabled: true }}` 是 SPEC 要求，RN 原生与 RN-web 都认；
+ *   - `editable={false}` → web 渲染 `readonly`，原生同步 disabled；
+ *   - web 的 `<input>` 还要真正的 `disabled` 属性：RN-web 的 TextInput 会把 `disabled`
+ *     直接透传到 DOM（forwardPropsList 里有它），而 `aria-disabled` 只表达语义、不挡键盘。
+ */
+function lockProps(locked) {
+  if (!locked) return null;
+  return {
+    editable: false,
+    'aria-disabled': true,
+    accessibilityState: { disabled: true },
+    ...(Platform.OS === 'web' ? { disabled: true } : null),
+  };
+}
+
+function Field({
+  label,
+  meta,
+  value,
+  onChangeText,
+  testID,
+  placeholder,
+  keyboardType,
+  secure,
+  multiline,
+  inputRef,
+  locked = false,
+}) {
   return (
     <View style={styles.field}>
       <View style={styles.fieldHead}>
-        <Text style={styles.fieldLabel}>{label}</Text>
+        <Text style={[styles.fieldLabel, locked && styles.fieldLabelLocked]}>{label}</Text>
         {meta ? <Text style={styles.fieldMeta}>{meta}</Text> : null}
       </View>
       <TextInput
         testID={testID}
-        style={[styles.input, multiline && styles.inputMulti]}
+        ref={inputRef}
+        style={[styles.input, multiline && styles.inputMulti, locked && styles.inputLocked]}
         value={value}
         onChangeText={onChangeText}
         placeholder={placeholder}
@@ -48,6 +78,7 @@ function Field({ label, meta, value, onChangeText, testID, placeholder, keyboard
         secureTextEntry={!!secure}
         multiline={!!multiline}
         accessibilityLabel={label}
+        {...lockProps(locked)}
       />
     </View>
   );
@@ -59,6 +90,13 @@ function Field({ label, meta, value, onChangeText, testID, placeholder, keyboard
  * v1.5 起设置页有**两组互不相干的服务**，版面按这个事实分区，别让用户以为配一个就够：
  *   1. 引擎模式（§3.9c 三档）+「能看图的模型」——决定照片怎么变成判断；
  *   2. 决策模型来源 / 地址 / 模型名 / Key——决定 6 维分数由谁算。
+ * 版面顺序把①放在②**之前**，并且①没配好时②整组不可操作（v1.6）：
+ * 架构是「本地模型打分 → 能看图的模型纠正」，没有视觉模型就没有纠正环节，
+ * 用户拿到的只是实测判断力不合格的本地分（得体 vs 荒谬的面试穿搭只差 0.4），
+ * 所以先配视觉模型 = 先保证结论可用。
+ *
+ * 放行开关（`visionServerSide`）：直连本机 Laya 适配器时视觉模型**已配在服务端**，
+ * 不该逼用户把服务端的 Key 在手机上再填一遍；勾选即视为视觉已就绪，并随配置持久化。
  */
 export default function SettingsScreen({
   config,

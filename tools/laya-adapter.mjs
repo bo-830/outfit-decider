@@ -480,6 +480,51 @@ function fallbackDescription(lookId) {
     + '鞋履：未清晰显示；配饰：未清晰显示；身材视觉效果：未清晰显示；其他细节：未清晰显示';
 }
 
+/** App 请求体 → Laya 批处理请求体（states 数组，其余与单条一致）。 */
+export function toLayaBatchRequest(body) {
+  const states = (Array.isArray(body && body.looks) ? body.looks : [])
+    .map((look) => (look && typeof look.state === 'string' ? look.state : ''));
+  const questions = {};
+  const first = (Array.isArray(body && body.looks) ? body.looks : [])[0];
+  const incoming = first && Array.isArray(first.questions) ? first.questions : [];
+  const context = { scene: sceneOf(states[0]) };
+  for (const item of incoming) {
+    if (!item || !item.id) continue;
+    questions[String(item.id)] = toLayaQuestion(item, context);
+  }
+  const out = { states, questions };
+  if (MODEL) out.model = MODEL;
+  return out;
+}
+
+/**
+ * Laya 批处理响应 → App 批处理响应。
+ * Laya 保证 `results` 与 `states` 同序，本函数按索引回填 lookId，
+ * 并校验条数；条数不符就报错，绝不把结果错配到别的穿上（错配比失败更糟）。
+ */
+export function toAppBatchResponse(layaBody, lookIds) {
+  const results = Array.isArray(layaBody && layaBody.results) ? layaBody.results : [];
+  if (results.length !== lookIds.length) {
+    const err = new Error(`batch result count mismatch: ${results.length} != ${lookIds.length}`);
+    err.kind = 'parse';
+    throw err;
+  }
+  const usage = (layaBody && layaBody.total_usage) || {};
+  const looks = lookIds.map((lookId, index) => {
+    const one = toAppResponse(results[index], Object.keys(SCORE_RUBRICS));
+    return { lookId, model: one.model, answers: one.answers, usage: one.usage };
+  });
+  return {
+    model: looks[0] ? looks[0].model : 'laya',
+    looks,
+    usage: {
+      prompt_tokens: toInt(usage.input_tokens),
+      completion_tokens: toInt(usage.output_tokens),
+      total_tokens: toInt(usage.input_tokens) + toInt(usage.output_tokens),
+    },
+  };
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
@@ -504,6 +549,52 @@ const server = http.createServer(async (req, res) => {
       upstream,
       vision: VISION_BASE_URL ? { configured: true, model: VISION_MODEL } : { configured: false },
     });
+    return;
+  }
+
+  /**
+   * 批处理入口（SPEC §3.11 v1.6）：把 N 套的 6 维打分合并成**一次**上游调用。
+   * Laya 的 /v1/systemone/batch 在单次 forward pass 内 collate 多行，省掉 N-1 次往返与调度。
+   * 注意：实测在这台 CPU 机器上加速比只有约 1.07x（瓶颈是算力不是往返），
+   * 真正收益在 GPU 或多并发场景；但批处理**不改变分数**（实测 4/4 逐条一致），所以可安全启用。
+   */
+  if (req.method === 'POST' && (url.pathname === '/ask/batch' || url.pathname === '/v1/systemone/batch')) {
+    let body;
+    try {
+      body = JSON.parse((await readBody(req)).toString('utf8'));
+    } catch {
+      sendJson(res, 400, { error: { message: 'request body must be valid JSON' } });
+      return;
+    }
+    const looks = Array.isArray(body.looks) ? body.looks : [];
+    if (!looks.length) {
+      sendJson(res, 400, { error: { message: "request body must carry a 'looks' array" } });
+      return;
+    }
+    const started = Date.now();
+    try {
+      const layaBody = toLayaBatchRequest(body);
+      const r = await fetchJson(`${UPSTREAM}/v1/systemone/batch`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(UPSTREAM_KEY ? { Authorization: `Bearer ${UPSTREAM_KEY}` } : {}),
+        },
+        body: JSON.stringify(layaBody),
+      }, 180000);
+      if (r.status < 200 || r.status >= 300 || !r.json) {
+        process.stdout.write(`[adapter] /ask/batch -> upstream ${r.status} ms=${Date.now() - started}\n`);
+        sendJson(res, r.status || 502, { error: { message: `upstream HTTP ${r.status}` } });
+        return;
+      }
+      const payload = toAppBatchResponse(r.json, looks.map((look) => String(look.lookId)));
+      process.stdout.write(`[adapter] /ask/batch -> 200 looks=${looks.length} ms=${Date.now() - started}\n`);
+      sendJson(res, 200, payload);
+    } catch (err) {
+      const message = String(err && err.message ? err.message : err);
+      process.stdout.write(`[adapter] /ask/batch ERROR ${message.slice(0, 160)}\n`);
+      sendJson(res, err && err.kind === 'parse' ? 502 : 502, { error: { message: 'batch failed' } });
+    }
     return;
   }
 

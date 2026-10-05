@@ -25,6 +25,7 @@ test('DEFAULT_CONFIG 与 SPEC §3.10 逐字一致', () => {
     visionModel: '',
     visionApiKey: '',
     visionTimeoutMs: 60000,
+    visionServerSide: false,
     visionMaxTokens: 4000,
     baseUrl: 'http://127.0.0.1:8787',
     askPath: '/ask',

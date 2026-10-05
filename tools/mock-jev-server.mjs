@@ -811,6 +811,80 @@ export function createMockServer() {
       return;
     }
 
+    /**
+     * SPEC §3.11 v1.6 · 批处理对端（App 契约）：一次请求给多套打分。
+     * 与 Laya 的 /v1/systemone/batch 同序返回，分数与逐条路径**完全一致**
+     * （同一套种子算法），这样门禁才能证明"批处理不改变结论"。
+     */
+    if (req.method === 'POST' && (url.pathname === '/ask/batch' || url.pathname === '/v1/systemone/batch')) {
+      let body;
+      try {
+        body = JSON.parse(await readBody(req));
+      } catch {
+        sendJson(res, 400, { error: { message: 'invalid json body' } });
+        return;
+      }
+      const looks = Array.isArray(body && body.looks) ? body.looks : null;
+      const states = looks ? null : (Array.isArray(body && body.states) ? body.states : null);
+      if (!looks && !states) {
+        sendJson(res, 400, { error: { message: "request body must carry a 'looks' array" } });
+        return;
+      }
+      const model = typeof body.model === 'string' && body.model ? body.model : serverModel;
+
+      if (model === 'test-auth-fail') {
+        sendJson(res, 401, { error: { message: 'invalid api key' } });
+        return;
+      }
+      if (model === 'test-server-error') {
+        sendJson(res, 500, { error: { message: 'internal model error' } });
+        return;
+      }
+      // 专门用来验证"批处理失败要回退逐条"这条路径
+      if (model === 'test-batch-fail') {
+        sendJson(res, 500, { error: { message: 'batch unsupported' } });
+        process.stdout.write(`[mock] ${route} model=test-batch-fail -> 500\n`);
+        return;
+      }
+
+      const entries = looks
+        ? looks.map((look) => ({
+          lookId: String(look && look.lookId ? look.lookId : ''),
+          state: typeof (look && look.state) === 'string' ? look.state : '',
+          questions: look && Array.isArray(look.questions) ? look.questions : [],
+        }))
+        : states.map((state, index) => ({
+          lookId: `look${index + 1}`,
+          state: typeof state === 'string' ? state : '',
+          questions: Array.isArray(body.questions) ? body.questions : [],
+        }));
+
+      const results = entries.map((entry) => {
+        const ctx = { model, state: entry.state, images: [] };
+        const answers = buildAnswers(entry.questions, ctx);
+        return { model, answers, usage: { input_tokens: 64 + entry.state.length, output_tokens: 16 * answers.length } };
+      });
+
+      const totalIn = results.reduce((sum, r) => sum + r.usage.input_tokens, 0);
+      const totalOut = results.reduce((sum, r) => sum + r.usage.output_tokens, 0);
+      const payload = looks
+        ? {
+          model,
+          looks: results.map((r, index) => ({
+            lookId: entries[index].lookId, model: r.model, answers: r.answers, usage: r.usage,
+          })),
+          usage: { prompt_tokens: totalIn, completion_tokens: totalOut, total_tokens: totalIn + totalOut },
+        }
+        : {
+          model,
+          results,
+          total_usage: { input_tokens: totalIn, output_tokens: totalOut },
+        };
+      sendJson(res, 200, payload);
+      process.stdout.write(`[mock] ${route} model=${model} looks=${entries.length}\n`);
+      return;
+    }
+
     sendJson(res, 404, { error: { message: `no route for ${route}` } });
   });
 }

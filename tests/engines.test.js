@@ -80,8 +80,9 @@ test('vision.describeLook：空 content → {kind:invalid_input}', async () => {
 
 /* ------------------------------- scoreSystem ------------------------------- */
 
-test('scoreSystem：4 套并行，6 维分数合法、降序、shape 正确（§7 断言 2）', async () => {
-  const mock = makeFetchMock();
+test('scoreSystem（逐条回退路径）：4 套并行，6 维分数合法、降序、shape 正确（§7 断言 2）', async () => {
+  // noBatch：对端没有批处理端点 → 先试一次批处理（404），再回退逐条并行
+  const mock = makeFetchMock({ noBatch: true });
   const system = makeScoreSystem({ api: apiWith(mock), model: 'outfit-judge-v1' });
   const result = await system.scoreLooks({
     artifacts: artifacts(),
@@ -90,8 +91,11 @@ test('scoreSystem：4 套并行，6 维分数合法、降序、shape 正确（§
     question: QUESTION,
   });
 
-  assert.equal(mock.calls.length, 4);
-  for (const call of mock.calls) {
+  const batchProbe = mock.calls.filter((call) => String(call.url).endsWith('/ask/batch'));
+  const perLook = mock.calls.filter((call) => String(call.url).endsWith('/ask'));
+  assert.equal(batchProbe.length, 1, '先探测一次批处理');
+  assert.equal(perLook.length, 4, '回退后逐条发 4 次');
+  for (const call of perLook) {
     assert.deepEqual(call.body.questions.map((item) => item.id), SCORE_QUESTION_IDS, '6 维 question id 必须逐字对齐');
     assert.ok(call.body.questions.every((item) => item.type === 'score'));
     assert.ok(/【穿搭[一二三四]】/.test(call.body.state), 'mock 靠【穿搭N】区分套数');
@@ -146,7 +150,7 @@ test('scoreSystem：相关维度只影响 relevance，问题数恒为 6（§3.4�
 });
 
 test('scoreSystem：单套失败 → overall=null 且不阻塞其他套（§5.4）', async () => {
-  const mock = makeFetchMock({ failures: { look3: { status: 500 } } });
+  const mock = makeFetchMock({ noBatch: true, failures: { look3: { status: 500 } } });
   const system = makeScoreSystem({ api: apiWith(mock), model: 'm' });
   const result = await system.scoreLooks({
     artifacts: artifacts(),
@@ -163,7 +167,7 @@ test('scoreSystem：单套失败 → overall=null 且不阻塞其他套（§5.4�
 });
 
 test('scoreSystem：描述为空的套不发起请求，其余照常出分', async () => {
-  const mock = makeFetchMock();
+  const mock = makeFetchMock({ noBatch: true });
   const system = makeScoreSystem({ api: apiWith(mock), model: 'm' });
   const result = await system.scoreLooks({
     artifacts: artifacts(),
@@ -171,7 +175,8 @@ test('scoreSystem：描述为空的套不发起请求，其余照常出分', asy
     userState: STATE,
     question: QUESTION,
   });
-  assert.equal(mock.calls.length, 3, '空描述不值得再打一次分');
+  const perLook = mock.calls.filter((call) => String(call.url).endsWith('/ask'));
+  assert.equal(perLook.length, 3, '空描述不值得再打一次分（另有一次批处理探测）');
   const empty = result.ranked.find((row) => row.lookId === 'look1');
   assert.equal(empty.overall, null);
   assert.equal(empty.rank, 4);
@@ -222,7 +227,7 @@ test('scoreSystem：全部无法识别 → invalid_input；全部硬失败 → �
 });
 
 test('scoreSystem：并发上限 4（4 套同时在飞）', async () => {
-  const mock = makeFetchMock({ delayMs: 25 });
+  const mock = makeFetchMock({ delayMs: 25, noBatch: true });
   const system = makeScoreSystem({ api: apiWith(mock), model: 'm' });
   await system.scoreLooks({
     artifacts: artifacts(),
@@ -361,6 +366,103 @@ test('deepReportSchema：字面量 schema 结构 + fixtures 逐条通过校验',
   assertSchema(parseDeepReport(JSON.stringify(loadDeepFixture('report-4looks'))), schema, 'parsed');
 });
 
+/* --------------------------- 批处理（§3.11 v1.6） --------------------------- */
+
+test('scoreSystem：有批处理端点时只用一次请求（4 套 → 1 次 /ask/batch）', async () => {
+  const mock = makeFetchMock();
+  const system = makeScoreSystem({ api: apiWith(mock), model: 'm' });
+  const result = await system.scoreLooks({
+    artifacts: artifacts(),
+    descriptions: descriptionsFor(),
+    userState: STATE,
+    question: QUESTION,
+  });
+
+  const batchCalls = mock.calls.filter((call) => String(call.url).endsWith('/ask/batch'));
+  const singleCalls = mock.calls.filter((call) => String(call.url).endsWith('/ask'));
+  assert.equal(batchCalls.length, 1, '应恰好一次批处理请求');
+  assert.equal(singleCalls.length, 0, '批处理可用时不应再逐条发');
+  assert.equal(batchCalls[0].body.looks.length, 4, '一次带齐 4 套');
+  assert.equal(result.ranked.length, 4);
+});
+
+test('scoreSystem：批处理与逐条的分数完全一致（含排序）', async () => {
+  const batchMock = makeFetchMock();
+  const singleMock = makeFetchMock({ noBatch: true });
+  const viaBatch = await makeScoreSystem({ api: apiWith(batchMock), model: 'm' }).scoreLooks({
+    artifacts: artifacts(), descriptions: descriptionsFor(), userState: STATE, question: QUESTION,
+  });
+  const viaSingle = await makeScoreSystem({ api: apiWith(singleMock), model: 'm' }).scoreLooks({
+    artifacts: artifacts(), descriptions: descriptionsFor(), userState: STATE, question: QUESTION,
+  });
+
+  // 批处理只是少了几次往返，绝不能改变结论
+  assert.deepEqual(
+    viaBatch.ranked.map((row) => [row.lookId, row.rank, row.overall]),
+    viaSingle.ranked.map((row) => [row.lookId, row.rank, row.overall]),
+    '批处理不得改变名次与分数',
+  );
+  assert.deepEqual(viaBatch.byLook, viaSingle.byLook, '两路径的每套分数必须逐位一致');
+  assert.deepEqual(viaBatch.ids, viaSingle.ids);
+});
+
+test('scoreSystem：批处理整批失败 → 自动回退逐条，不让对端不兼容拖垮整轮', async () => {
+  const mock = makeFetchMock();
+  const api = apiWith(mock, { model: 'test-batch-fail' });
+  const system = makeScoreSystem({ api, model: 'test-batch-fail' });
+  const result = await system.scoreLooks({
+    artifacts: artifacts(),
+    descriptions: descriptionsFor(),
+    userState: STATE,
+    question: { ...QUESTION },
+  });
+
+  const batchCalls = mock.calls.filter((call) => String(call.url).endsWith('/ask/batch'));
+  const singleCalls = mock.calls.filter((call) => String(call.url).endsWith('/ask'));
+  assert.equal(batchCalls.length, 1, '先尝试批处理');
+  assert.equal(singleCalls.length, 4, '整批失败后必须逐条补齐 4 套');
+  assert.equal(result.ranked.length, 4, '回退后结果仍要完整');
+  assert.ok(result.ranked.every((row) => row.scores.overall_score !== null), '回退后每套都要有分');
+});
+
+test('scoreSystem：批处理只覆盖可打分的套（空描述不进入批）', async () => {
+  const mock = makeFetchMock();
+  const system = makeScoreSystem({ api: apiWith(mock), model: 'm' });
+  const result = await system.scoreLooks({
+    artifacts: artifacts(),
+    descriptions: { ...descriptionsFor(), look2: '' },
+    userState: STATE,
+    question: QUESTION,
+  });
+
+  const batchCall = mock.calls.find((call) => String(call.url).endsWith('/ask/batch'));
+  assert.ok(batchCall, '应有批处理请求');
+  assert.equal(batchCall.body.looks.length, 3, '空描述那套不应进批');
+  assert.ok(!batchCall.body.looks.some((look) => look.lookId === 'look2'));
+  assert.equal(result.byLook.look2.scores.overall_score, null, '空描述的套仍然无分');
+});
+
+test('scoreSystem：只有 1 套可打分时不走批处理（批处理没有意义）', async () => {
+  const mock = makeFetchMock();
+  const system = makeScoreSystem({ api: apiWith(mock), model: 'm' });
+  await system.scoreLooks({
+    artifacts: artifacts(['look1']),
+    descriptions: descriptionsFor(['look1']),
+    userState: STATE,
+    question: QUESTION,
+  });
+  assert.equal(mock.calls.filter((call) => String(call.url).endsWith('/ask/batch')).length, 0);
+  assert.equal(mock.calls.filter((call) => String(call.url).endsWith('/ask')).length, 1);
+});
+
+test('api.askBatch：批处理路径是 askPath + /batch，且受 baseUrl 支配', () => {
+  const api = makeApi({ config: { ...DEFAULT_CONFIG, askPath: '/ask' }, fetchImpl: makeFetchMock() });
+  assert.equal(typeof api.askBatch, 'function');
+  assert.equal(api.decisionConfigured(), true);
+  const noBase = makeApi({ config: { ...DEFAULT_CONFIG, baseUrl: '' }, fetchImpl: makeFetchMock() });
+  assert.equal(noBase.decisionConfigured(), false, 'baseUrl 为空即视为未配置决策模型');
+});
+
 /* ------------------------------ orchestrator ------------------------------- */
 
 test('orchestrator.runQuick：describe → score 的进度与结果', async () => {
@@ -390,24 +492,26 @@ test('orchestrator.runQuick：describe → score 的进度与结果', async () =
   assert.equal(quick.ranked.length, 4);
   assert.equal(quick.weakNetwork, false);
   assert.deepEqual(Object.keys(quick.descriptions), LOOKS);
-  const describeCalls = mock.calls.filter((call) => String(call.body.questions[0].id).startsWith('describe_'));
-  // 打分请求的首个问题 id 是 overall_score；必须同时排除 describe_*
-  const scoreCalls = mock.calls.filter((call) => call.body.questions[0].id === 'overall_score'
-    && !call.body.questions.some((q) => String(q.id).startsWith('describe_')));
+
+  // v1.6：打分走批处理 —— 一次 /ask/batch 覆盖 4 套，而不是 4 次 /ask
+  const batchCalls = mock.calls.filter((call) => String(call.url).endsWith('/ask/batch'));
+  assert.equal(batchCalls.length, 1, '打分应合并为一次批处理');
+  assert.equal(batchCalls[0].body.looks.length, 4);
+  const describeCalls = mock.calls.filter((call) => String(call.url).endsWith('/ask')
+    && Array.isArray(call.body.questions)
+    && String(call.body.questions[0].id).startsWith('describe_'));
+  const perLookScoreCalls = mock.calls.filter((call) => String(call.url).endsWith('/ask')
+    && Array.isArray(call.body.questions)
+    && call.body.questions[0].id === 'overall_score');
   assert.equal(describeCalls.length, 4);
-  assert.equal(scoreCalls.length, 4);
-  // 本用例没有配置多模态端点，纠正步骤必须**直接放弃**（vision_unconfigured），
-  // 而不是把纠正请求降级成一轮多余的打分请求打到决策模型上：
-  // 那会白花一倍算力、还不报错。这两条断言就是防它复发的。
-  assert.equal(mock.calls.length, 8, '4 次 describe + 4 次 score，纠正不得降级成额外打分');
-  assert.equal(quick.reviewFailed, true);
-  assert.equal(quick.reviewErrorKind, 'vision_unconfigured');
+  assert.equal(perLookScoreCalls.length, 0, '批处理可用时不应再有逐条打分');
+  assert.equal(mock.calls.length, 5, '4 次 describe + 1 次批处理（纠正已因未配 vision 放弃）');
   assert.ok(
     describeCalls.every((call) => call.body.images.length === 1),
     '§3.7 v1.2：每次 describe 只带自己那 1 张图',
   );
   assert.deepEqual(describeCalls.map((call) => call.body.images[0].id).sort(), LOOKS);
-  assert.ok(scoreCalls.every((call) => call.body.images === undefined), 'score 阶段不需要图');
+  assert.ok(batchCalls[0].body.looks.every((look) => look.images === undefined), '打分阶段不需要图');
 });
 
 test('orchestrator.runQuick：test-partial-fail → look1 的 overall 必须是 null，其余 3 套正常（§5.4）', async () => {

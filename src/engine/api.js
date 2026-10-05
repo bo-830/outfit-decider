@@ -21,6 +21,9 @@ export const DEFAULT_CONFIG = {
   visionModel: '',
   visionApiKey: '',
   visionTimeoutMs: 60000,
+  // 视觉模型是否已配在**服务端**（如本机 Laya 适配器用自己的 .env.local 配好）。
+  // 只影响设置页的配置闸门顺序，不改变运行时行为。
+  visionServerSide: false,
   // 推理模型的输出预算。太小 → reasoning 吃光 → content 空串（HTTP 200），
   // 会被误判成 parse 失败。纠正一次要给 N 套 × 6 维分数，留足余量。
   visionMaxTokens: 4000,
@@ -314,6 +317,80 @@ export function makeApi({ config, fetchImpl = globalThis.fetch } = {}) {
   }
 
   /**
+   * SPEC §3.11 v1.6 · 批处理：一次请求给多套打分。
+   *
+   * 请求形状（App 契约）：`POST {baseUrl}{askPath}/batch` `{model, looks:[{lookId, state, questions}]}`
+   * 响应：`{model, looks:[{lookId, model, answers, usage}], usage}`
+   *
+   * 为什么值得单独一条通道：Laya 侧 `/v1/systemone/batch` 会在**单次 forward pass** 内
+   * collate 多行，省掉 N-1 次 HTTP 往返与调度。实测本机 CPU 上加速比约 1.07x
+   * （瓶颈是算力不是往返），但批处理**不改变分数**，所以在 GPU / 多并发下是净收益。
+   *
+   * 失败语义：整批失败按普通错误抛出；调用方负责回退到逐条并行（见 scoreSystem）。
+   */
+  async function askBatch(request = {}) {
+    const cfg = settings();
+    const doFetch = resolveFetch();
+    const base = normalizeBaseUrl(cfg.baseUrl);
+    if (!doFetch || !base) throw apiError('network');
+
+    const { looks, timeoutMs, signal, model } = request;
+    const list = Array.isArray(looks) ? looks : [];
+    if (!list.length) throw apiError('invalid_input');
+    const requestModel = typeof model === 'string' && model ? model : cfg.model;
+    const body = {
+      model: requestModel,
+      looks: list.map((item) => ({
+        lookId: item.lookId,
+        state: item.state ?? '',
+        questions: item.questions,
+      })),
+    };
+
+    const headers = { 'Content-Type': 'application/json' };
+    if (cfg.mode === 'jev') {
+      const key = typeof cfg.apiKey === 'string' ? cfg.apiKey.trim() : '';
+      if (key) headers.Authorization = `Bearer ${key}`;
+    }
+
+    const url = `${base}${batchPathOf(cfg)}`;
+    const gate = createAbortGate(signal, Number.isFinite(timeoutMs) ? timeoutMs : cfg.quickTimeoutMs);
+    try {
+      let response;
+      try {
+        response = await doFetch(url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(body),
+          signal: gate.signal,
+        });
+      } catch (err) {
+        throw normalizeFailure(err, gate);
+      }
+      const status = Number(response && response.status);
+      const ok = response && typeof response.ok === 'boolean'
+        ? response.ok
+        : Number.isFinite(status) && status >= 200 && status < 300;
+      if (!ok) throw apiError(statusKind(status), { status: Number.isFinite(status) ? status : 0 });
+
+      let data;
+      try {
+        data = await response.json();
+      } catch {
+        throw gate.timedOut ? apiError('timeout') : apiError('parse');
+      }
+      if (!data || !Array.isArray(data.looks) || !data.looks.length) throw apiError('parse');
+      return {
+        model: typeof data.model === 'string' && data.model ? data.model : requestModel,
+        looks: data.looks,
+        usage: normalizeUsage(data.usage),
+      };
+    } finally {
+      gate.cleanup();
+    }
+  }
+
+  /**
    * 多模态通道是否可用（SPEC §3.9c）。
    * vision.js 用它决定 describe 走哪条通道：配了就走 vision 看原图，没配就退回决策模型的
    * JEv `/ask`。没有这个判断，"只配了本地决策模型"的部署会在第一步就整体失败。
@@ -324,7 +401,18 @@ export function makeApi({ config, fetchImpl = globalThis.fetch } = {}) {
     return !!(normalizeBaseUrl(cfg.visionBaseUrl) && cfg.visionModel);
   }
 
-  return { ask, health, vision, visionConfigured };
+  /** 决策模型（打分）是否已配置：baseUrl 是唯一必需项。 */
+  function decisionConfigured() {
+    return !!normalizeBaseUrl(settings().baseUrl);
+  }
+
+  return { ask, askBatch, health, vision, visionConfigured, decisionConfigured };
+}
+
+/** 批处理路径：在 askPath 后加 /batch（askPath='/ask' → '/ask/batch'）。 */
+function batchPathOf(cfg) {
+  const ask = normalizePath(cfg.askPath, DEFAULT_CONFIG.askPath);
+  return `${ask.replace(/\/+$/, '')}/batch`;
 }
 
 /** 把文本 + 图片组装成 OpenAI 多模态 content 数组（无图时退化为纯文本，兼容纯文本端点）。 */

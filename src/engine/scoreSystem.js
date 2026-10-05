@@ -14,7 +14,8 @@ const LOOK_CONCURRENCY = 4;
 
 export function makeScoreSystem({ api, model } = {}) {
   /**
-   * SPEC §3.8 · 每套一次 ask（并发上限 4）。单套失败 → 该套 overall=null，不阻塞其他套。
+   * SPEC §3.8 / §3.11 v1.6 · 打分：优先用**批处理**一次发完，失败则回退逐条并行。
+   * 单套失败 → 该套 overall=null，不阻塞其他套（partial fail 允许）。
    */
   async function scoreLooks({ artifacts, descriptions, userState, question, signal, onProgress } = {}) {
     const list = (Array.isArray(artifacts) ? artifacts : []).filter((item) => item && item.lookId);
@@ -32,50 +33,95 @@ export function makeScoreSystem({ api, model } = {}) {
     const results = new Map();
     let done = 0;
 
-    const tasks = ids.map((lookId) => async () => {
-      const description = descriptionMap[lookId] || '';
-      try {
-        if (!isMeaningfulDescription(description)) {
-          results.set(lookId, { ok: false, kind: 'invalid_input' });
-          return;
-        }
-        if (signal && signal.aborted) {
-          results.set(lookId, { ok: false, kind: 'cancelled' });
-          return;
-        }
-        const state = buildSyntheticStateText({
-          descriptions: { [lookId]: description },
-          userState,
-          question,
-        });
-        const response = await api.ask({ state, questions, signal, model });
-        const byId = buildScoreAnswers(response && response.answers);
-        const scores = {};
-        const confidences = {};
-        for (const id of SCORE_QUESTION_IDS) {
-          scores[id] = byId[id] ? byId[id].score : null;
-          confidences[id] = byId[id] ? byId[id].confidence : null;
-        }
-        if (SCORE_QUESTION_IDS.every((id) => scores[id] === null)) {
-          results.set(lookId, { ok: false, kind: 'parse' });
-          return;
-        }
-        results.set(lookId, {
-          ok: true,
-          scores,
-          confidences,
-          usage: response && response.usage ? response.usage : null,
-          model: response && response.model ? response.model : null,
-        });
-      } catch (err) {
-        results.set(lookId, { ok: false, kind: (err && err.kind) || 'server' });
-      } finally {
-        done += 1;
-        if (typeof onProgress === 'function') onProgress({ done, total: ids.length });
+    /** 逐条结果 → results Map；两条路径（批处理 / 逐条）共用同一套解析与失败语义。 */
+    const recordAnswer = (lookId, answers, meta = {}) => {
+      const byId = buildScoreAnswers(answers);
+      const scores = {};
+      const confidences = {};
+      for (const id of SCORE_QUESTION_IDS) {
+        scores[id] = byId[id] ? byId[id].score : null;
+        confidences[id] = byId[id] ? byId[id].confidence : null;
       }
+      if (SCORE_QUESTION_IDS.every((id) => scores[id] === null)) {
+        results.set(lookId, { ok: false, kind: 'parse' });
+        return;
+      }
+      results.set(lookId, {
+        ok: true,
+        scores,
+        confidences,
+        // usage/model 必须透传：否则聚合出的 usage 会变成全 0，报告里就丢了真实计费信息
+        usage: meta.usage || null,
+        model: meta.model || null,
+      });
+    };
+
+    /** 描述不可用的套不发请求（省算力），直接判 invalid_input。 */
+    const scorable = [];
+    for (const lookId of ids) {
+      const description = descriptionMap[lookId] || '';
+      if (!isMeaningfulDescription(description)) {
+        results.set(lookId, { ok: false, kind: 'invalid_input' });
+      } else if (signal && signal.aborted) {
+        results.set(lookId, { ok: false, kind: 'cancelled' });
+      } else {
+        scorable.push(lookId);
+      }
+    }
+
+    const stateOf = (lookId) => buildSyntheticStateText({
+      descriptions: { [lookId]: descriptionMap[lookId] || '' },
+      userState,
+      question,
     });
 
-    await runWithLimit(tasks, LOOK_CONCURRENCY);
+    // ① 批处理：一次请求覆盖全部可打分的套
+    let batchHandled = false;
+    if (scorable.length > 1 && typeof api.askBatch === 'function') {
+      try {
+        const response = await api.askBatch({
+          looks: scorable.map((lookId) => ({ lookId, state: stateOf(lookId), questions })),
+          signal,
+          model,
+        });
+        const byLook = new Map();
+        for (const entry of response.looks || []) {
+          if (entry && entry.lookId) byLook.set(String(entry.lookId), entry);
+        }
+        for (const lookId of scorable) {
+          const entry = byLook.get(lookId);
+          if (entry) recordAnswer(lookId, entry.answers, { usage: entry.usage, model: entry.model });
+          else results.set(lookId, { ok: false, kind: 'parse' });
+          done += 1;
+          if (typeof onProgress === 'function') onProgress({ done, total: ids.length });
+        }
+        batchHandled = true;
+      } catch (err) {
+        // 批处理整批失败（对端不支持 / 超时 / 解析失败）→ 回退逐条，不能让一处不兼容拖垮整轮评分
+        if (err && err.kind === 'cancelled') throw err;
+        batchHandled = false;
+      }
+    }
+
+    // ② 逐条并行（并发上限 4）：批处理不可用或整批失败时的路径
+    if (!batchHandled) {
+      const tasks = scorable.map((lookId) => async () => {
+        const state = stateOf(lookId);
+        try {
+          const response = await api.ask({ state, questions, signal, model });
+          recordAnswer(lookId, response && response.answers, {
+            usage: response && response.usage,
+            model: response && response.model,
+          });
+        } catch (err) {
+          results.set(lookId, { ok: false, kind: (err && err.kind) || 'server' });
+        } finally {
+          done += 1;
+          if (typeof onProgress === 'function') onProgress({ done, total: ids.length });
+        }
+      });
+      await runWithLimit(tasks, LOOK_CONCURRENCY);
+    }
 
     const rows = ids.map((lookId) => {
       const result = results.get(lookId) || { ok: false, kind: 'server' };

@@ -95,7 +95,8 @@ export function deepReportForLookIds(ids) {
 /**
  * @param {{
  *   delayMs?: number, timeoutHangMs?: number, healthStatus?: number,
- *   failures?: Record<string, {status?: number, describeEmpty?: boolean, deepEmpty?: boolean}>
+ *   failures?: Record<string, {status?: number, describeEmpty?: boolean, deepEmpty?: boolean}>,
+ *   noBatch?: boolean   // true = 不提供 /ask/batch（404），用来验证"回退逐条"这条路径
  * }} options
  */
 export function makeFetchMock(options = {}) {
@@ -105,6 +106,7 @@ export function makeFetchMock(options = {}) {
   const healthStatus = Number.isFinite(options.healthStatus) ? options.healthStatus : 200;
   const timeoutHangMs = Number.isFinite(options.timeoutHangMs) ? options.timeoutHangMs : 30000;
   const failures = { ...(options.failures || {}) };
+  const noBatch = options.noBatch === true;
   let scenario = options.scenario || 'normal';
 
   async function fetchImpl(url, init = {}) {
@@ -128,9 +130,16 @@ export function makeFetchMock(options = {}) {
         if (healthStatus >= 400) return jsonResponse({ error: 'down' }, healthStatus);
         return jsonResponse({ ok: true, model: 'mock-model', uptime: 1 });
       }
-      if (!pathname.endsWith('/ask')) {
+      if (!pathname.endsWith('/ask') && !pathname.endsWith('/ask/batch')) {
         await wait(delayMs, init.signal);
         return new Response('not found', { status: 404, headers: TEXT_HEADERS });
+      }
+      if (pathname.endsWith('/ask/batch')) {
+        if (noBatch) {
+          await wait(delayMs, init.signal);
+          return new Response('not found', { status: 404, headers: TEXT_HEADERS });
+        }
+        return await handleBatch(body, init.signal);
       }
       return await handleAsk(body, init.signal);
     } finally {
@@ -166,6 +175,43 @@ export function makeFetchMock(options = {}) {
       return jsonResponse({ error: { message: 'injected failure' } }, failure.status);
     }
     return jsonResponse(payloadFor(body, model, failure));
+  }
+
+  /**
+   * 批处理对端（SPEC §3.11 v1.6）：一次请求给多套打分。
+   * 每套复用与之相同的 payloadFor，因此批处理与逐条的分数**完全一致** ——
+   * 这正是"批处理不改变结论"这条性质可被测试断言的前提。
+   */
+  async function handleBatch(body, signal) {
+    const model = body && body.model;
+    if (model === 'test-batch-fail') {
+      await wait(delayMs, signal);
+      return jsonResponse({ error: { message: 'batch unsupported' } }, 500);
+    }
+    if (model === 'test-auth-fail' || model === 'test-server-error') {
+      await wait(delayMs, signal);
+      return jsonResponse({ error: { message: 'injected' } }, model === 'test-auth-fail' ? 401 : 500);
+    }
+    await wait(delayMs, signal);
+    const looks = Array.isArray(body && body.looks) ? body.looks : [];
+    const out = looks.map((look) => {
+      const state = typeof (look && look.state) === 'string' ? look.state : '';
+      const questions = look && Array.isArray(look.questions) ? look.questions : [];
+      const lookId = look && look.lookId ? String(look.lookId) : 'look1';
+      const failure = failures[lookId] || {};
+      const payload = payloadFor({ state, questions, model }, model, failure);
+      return {
+        lookId,
+        model: payload.model,
+        answers: payload.answers,
+        usage: { prompt_tokens: body ? state.length : 0, completion_tokens: payload.answers.length * 4, total_tokens: 0 },
+      };
+    });
+    return jsonResponse({
+      model: model || 'mock-model',
+      looks: out,
+      usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+    });
   }
 
   function payloadFor(body, model, failure = {}) {
