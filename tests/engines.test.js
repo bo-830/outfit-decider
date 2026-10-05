@@ -381,18 +381,27 @@ test('orchestrator.runQuick：describe → score 的进度与结果', async () =
   assert.ok(describing.every((event) => typeof event.text === 'string' && event.text.length > 0), 'App 需要拿到描述文本');
 
   const scoring = events.filter((event) => event.stage === 'scoring');
-  assert.equal(scoring.length, 5, 'scoring 起点 + 4 次完成');
-  assert.deepEqual(scoring[0], { stage: 'scoring', done: 0, total: 4 });
-  assert.deepEqual(scoring.at(-1), { stage: 'scoring', done: 4, total: 4 });
+  // 并行档（默认 laya_review）下，Laya 打分的完成事件会与纠正阶段交错，
+  // 所以只断言"4 套都完成打分"，不锁定事件条数与交错顺序。
+  assert.ok(scoring.length >= 1, '至少有打分阶段的进度');
+  assert.equal(scoring.at(-1).total, 4);
+  assert.equal(Math.max(...scoring.map((event) => event.done)), 4, '4 套都应完成打分');
 
   assert.equal(quick.ranked.length, 4);
   assert.equal(quick.weakNetwork, false);
   assert.deepEqual(Object.keys(quick.descriptions), LOOKS);
-  assert.equal(mock.calls.length, 8, '4 次 describe + 4 次 score');
   const describeCalls = mock.calls.filter((call) => String(call.body.questions[0].id).startsWith('describe_'));
-  const scoreCalls = mock.calls.filter((call) => call.body.questions[0].id === 'overall_score');
+  // 打分请求的首个问题 id 是 overall_score；必须同时排除 describe_*
+  const scoreCalls = mock.calls.filter((call) => call.body.questions[0].id === 'overall_score'
+    && !call.body.questions.some((q) => String(q.id).startsWith('describe_')));
   assert.equal(describeCalls.length, 4);
   assert.equal(scoreCalls.length, 4);
+  // 本用例没有配置多模态端点，纠正步骤必须**直接放弃**（vision_unconfigured），
+  // 而不是把纠正请求降级成一轮多余的打分请求打到决策模型上：
+  // 那会白花一倍算力、还不报错。这两条断言就是防它复发的。
+  assert.equal(mock.calls.length, 8, '4 次 describe + 4 次 score，纠正不得降级成额外打分');
+  assert.equal(quick.reviewFailed, true);
+  assert.equal(quick.reviewErrorKind, 'vision_unconfigured');
   assert.ok(
     describeCalls.every((call) => call.body.images.length === 1),
     '§3.7 v1.2：每次 describe 只带自己那 1 张图',

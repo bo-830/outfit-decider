@@ -37,36 +37,62 @@ function layaScores(score) {
 }
 
 /**
+ * 双通道 fetch 替身（v1.5 起 describe 也走 vision 通道，替身必须照实模拟）。
+ *
+ * 通道判定与真实实现一致（SPEC §3.7 v1.5）：
+ *   配了多模态端点 → describe 走 /chat/completions 看原图
+ *   没配           → describe 退回决策模型的 JEv /ask
+ * 所以 vision 侧的替身要按「请客观描述这张穿搭照片」和「纠正」两种指令分别作答。
+ *
  * @param {object} options
- *   layaScore   决策模型给的分
- *   reviewJson  多模态模型返回的 content（字符串）；null 表示让纠正失败
+ *   layaScore    决策模型给的分
+ *   reviewJson   纠正指令的返回 content；null 表示返回空串（模拟推理吃光预算）
  *   reviewStatus 多模态响应的 HTTP 状态
  */
-function makeDualFetch({ layaScore = 1.5, reviewJson = null, reviewStatus = 200 } = {}) {
+function makeDualFetch({
+  layaScore = 1.5,
+  reviewJson = null,
+  reviewStatus = 200,
+  describeStatus = 200,
+  describeContent = DESCRIPTION,
+} = {}) {
   const calls = { decision: [], vision: [] };
   const fetchImpl = async (url, init) => {
     const body = JSON.parse(init.body || '{}');
     if (/chat\/completions/.test(url)) {
       calls.vision.push({ url, body, headers: init.headers });
-      if (reviewStatus !== 200) {
-        return { ok: false, status: reviewStatus, json: async () => ({ error: { message: 'boom' } }) };
+      const userMessage = (body.messages || []).find((m) => m && m.role === 'user');
+      const raw = userMessage ? userMessage.content : '';
+      const text = Array.isArray(raw)
+        ? raw.filter((p) => p && p.type === 'text').map((p) => p.text).join('\n')
+        : String(raw || '');
+      // 描述指令 vs 纠正指令：前者要求客观描述，后者要求输出 scores JSON。
+      // 两者要能分别注入故障——否则"纠正失败"的用例会连描述一起打挂，
+      // 测到的就不是 §3.9c 的回退语义了。
+      const isDescribe = /客观描述/.test(text);
+      const status = isDescribe ? describeStatus : reviewStatus;
+      if (status !== 200) {
+        return { ok: false, status, json: async () => ({ error: { message: 'boom' } }) };
       }
+      const content = isDescribe
+        ? describeContent
+        : (reviewJson === null ? '' : reviewJson);
       return {
         ok: true,
         status: 200,
         json: async () => ({
           model: 'vision-test',
-          choices: [{ message: { content: reviewJson === null ? '' : reviewJson } }],
+          choices: [{ message: { content } }],
           usage: { prompt_tokens: 500, completion_tokens: 60, total_tokens: 560 },
         }),
       };
     }
     calls.decision.push({ url, body });
-    // describe_* 返回客观描述；其余（6 维打分）返回固定分
+    // describe_* 只有在"没配多模态"时才会走到这里
     const isDescribe = Array.isArray(body.questions)
       && body.questions.some((q) => String(q.id).startsWith('describe_'));
     const answers = isDescribe
-      ? body.questions.map((q) => ({ id: q.id, type: 'text', content: DESCRIPTION, confidence: 0.8 }))
+      ? body.questions.map((q) => ({ id: q.id, type: 'text', content: describeContent, confidence: 0.8 }))
       : body.questions.map((q) => ({ id: q.id, type: 'score', score: layaScore, confidence: 0.5, content: '' }));
     return {
       ok: true,
@@ -88,30 +114,55 @@ const reviewRow = (lookId, base) => ({
   practical_score: base,
 });
 
-function orchestrator(dual, engineMode) {
+function orchestrator(dual, engineMode, configPatch = {}) {
   const api = makeApi({
     config: {
       ...DEFAULT_CONFIG,
       visionBaseUrl: 'https://vision.test/v1',
       visionModel: 'vision-test',
       visionApiKey: 'sk-vision-secret',
+      ...configPatch,
     },
     fetchImpl: dual.fetchImpl,
   });
   return makeOrchestrator({ api, model: 'laya', engineMode });
 }
 
+/** 只统计"纠正"调用（描述类调用不算）。 */
+const reviews = (dual) => dual.calls.vision.filter((call) => {
+  const raw = call.body.messages[1].content;
+  const text = Array.isArray(raw) ? raw.map((p) => p.text || '').join('') : String(raw || '');
+  return !/客观描述/.test(text);
+});
+
 /* ────────────────────────── 三档模式 ────────────────────────── */
 
-test('laya_only：不调用多模态通道，直接用 Laya 原分', async () => {
+test('laya_only：不发起纠正调用，直接用 Laya 原分（描述仍走 vision 看原图）', async () => {
   const dual = makeDualFetch({ layaScore: 1.5 });
   const quick = await orchestrator(dual, 'laya_only').runQuick({
     artifacts: artifacts(), userState: STATE, question: QUESTION,
   });
 
-  assert.equal(dual.calls.vision.length, 0, 'laya_only 不得碰多模态端点');
+  assert.equal(reviews(dual).length, 0, 'laya_only 不得发起纠正调用');
+  // SPEC §3.7 v1.5：配了多模态端点时，describe 就应该走 vision 看原图，而不是退到决策模型
+  assert.equal(dual.calls.vision.length, artifacts().length, '每套一次描述，且都走 vision 通道');
   assert.equal(quick.engineMode, 'laya_only');
   for (const row of quick.ranked) for (const id of SCORE_QUESTION_IDS) assert.equal(row.scores[id], 1.5);
+});
+
+test('§3.7 v1.5 双通道：没配多模态端点时，describe 退回决策模型的 JEv 通道', async () => {
+  const dual = makeDualFetch({ layaScore: 2.4 });
+  const quick = await orchestrator(dual, 'laya_only', { visionBaseUrl: '', visionModel: '' }).runQuick({
+    artifacts: artifacts(), userState: STATE, question: QUESTION,
+  });
+
+  assert.equal(dual.calls.vision.length, 0, '没配 vision 时不得碰该通道');
+  const describeCalls = dual.calls.decision.filter((c) => Array.isArray(c.body.questions)
+    && c.body.questions.some((q) => String(q.id).startsWith('describe_')));
+  assert.equal(describeCalls.length, artifacts().length, 'describe 应退回 /ask 通道并按套发请求');
+  // 退回通道也要把图带上，否则真实端点看不到画面
+  assert.ok(describeCalls.every((c) => Array.isArray(c.body.images) && c.body.images.length === 1));
+  assert.equal(quick.ranked.length, 2);
 });
 
 test('laya_review（默认档）：多模态推翻 Laya 的分数，排序随之重算', async () => {
@@ -124,12 +175,12 @@ test('laya_review（默认档）：多模态推翻 Laya 的分数，排序随之
     artifacts: artifacts(), userState: STATE, question: QUESTION,
   });
 
-  assert.equal(dual.calls.vision.length, 1, '应恰好调用一次多模态（全部图片一起给）');
-  assert.equal(dual.calls.vision[0].body.messages.length, 2, 'system + user');
-  const userContent = dual.calls.vision[0].body.messages[1].content;
+  assert.equal(reviews(dual).length, 1, '应恰好发起一次纠正调用（全部图片一起给）');
+  const review = reviews(dual)[0];
+  assert.equal(review.body.messages.length, 2, 'system + user');
+  const userContent = review.body.messages[1].content;
   assert.ok(Array.isArray(userContent), '带图时必须用 OpenAI 的 content 数组');
   assert.equal(userContent.filter((p) => p.type === 'image_url').length, 2, '两套图都要给到模型');
-  assert.ok(userContent[0].text.includes('【穿搭') === false || true);
 
   // 纠正后的分数必须生效，而不是被 Laya 的 1.5 覆盖
   assert.equal(quick.byLook.look1.scores.overall_score, 4.8);
@@ -142,7 +193,7 @@ test('laya_review（默认档）：多模态推翻 Laya 的分数，排序随之
   assert.deepEqual(quick.reviewChanged.slice().sort(), ['look1', 'look2']);
 });
 
-test('laya_review：提示词必须带上 Laya 的原始分与用户上下文（纠正是"参考后重判"）', async () => {
+test('laya_review：纠正提示词带上 Laya 原始分、用户上下文与场景，且允许画面推翻', async () => {
   const dual = makeDualFetch({
     layaScore: 2.0,
     reviewJson: reviewedJson([reviewRow('look1', 4.0), reviewRow('look2', 3.0)]),
@@ -150,15 +201,51 @@ test('laya_review：提示词必须带上 Laya 的原始分与用户上下文（
   await orchestrator(dual, 'laya_review').runQuick({
     artifacts: artifacts(), userState: STATE, question: QUESTION,
   });
-  const content = dual.calls.vision[0].body.messages[1].content;
-  const text = content[0].text;
-  assert.ok(text.includes('2.0'), '必须写明 Laya 的原始分');
+  const review = reviews(dual)[0];
+  const userContent = review.body.messages[1].content;
+  const text = Array.isArray(userContent) ? userContent[0].text : String(userContent);
   assert.ok(text.includes('正式面试'), '必须包含用户场合');
-  assert.ok(text.includes('哪套最适合今天的场合？'), '必须包含用户问题');
-  // 系统提示必须明确允许推翻
-  const system = dual.calls.vision[0].body.messages[0].content;
+  assert.ok(text.includes('哪套最适合今天的场合？'), '必须包含用户问题，纠正是针对用户问题的');
+  // laya_review 是**串行**档：Laya 分数已算出，所以提示词必须带上原始分供参考
+  assert.ok(text.includes('本地决策模型的原始判断'), '必须写明这是本地模型的原始判断');
+  assert.ok(text.includes('2.0'), '必须带上 Laya 的原始分（全部维度同为 2.0）');
+  // 系统提示必须明确允许推翻，并强调以画面为准
+  const system = review.body.messages[0].content;
   assert.ok(system.includes('推翻'), '系统提示必须允许推翻本地模型');
-  assert.ok(system.includes('只看') || system.includes('只能是你自己看到的画面'), '必须要求以画面为准');
+  assert.ok(system.includes('只能是你自己看到的画面'), '必须要求以画面为准');
+});
+
+test('multimodal_only：提示词必须说明"没有提供本地模型分数"（而不是留一段空白）', async () => {
+  const dual = makeDualFetch({ reviewJson: reviewedJson([reviewRow('look1', 4.0), reviewRow('look2', 3.0)]) });
+  await orchestrator(dual, 'multimodal_only').runQuick({
+    artifacts: artifacts(), userState: STATE, question: QUESTION,
+  });
+  const review = reviews(dual)[0];
+  const userContent = review.body.messages[1].content;
+  const text = Array.isArray(userContent) ? userContent[0].text : String(userContent);
+  assert.ok(text.includes('没有提供本地模型的分数'), '必须显式说明没有本地分可参考');
+  assert.ok(!text.includes('本地决策模型的原始判断'), '不得声称带了本地原始分');
+});
+
+test('review()（串行形态）：能拿到 base 时，提示词里必须写明 Laya 的原始分', async () => {
+  const dual = makeDualFetch({ reviewJson: reviewedJson([reviewRow('look1', 4.0)]) });
+  const api = makeApi({
+    config: { ...DEFAULT_CONFIG, visionBaseUrl: 'https://vision.test/v1', visionModel: 'vision-test' },
+    fetchImpl: dual.fetchImpl,
+  });
+  const system = makeReviewSystem({ api });
+  await system.review({
+    artifacts: artifacts(),
+    descriptions: { look1: '客观记录', look2: '客观记录' },
+    userState: STATE,
+    question: QUESTION,
+    base: { byLook: { look1: { scores: layaScores(2.0) }, look2: { scores: layaScores(3.5) } } },
+  });
+  const review = reviews(dual)[0];
+  const userContent = review.body.messages[1].content;
+  const text = Array.isArray(userContent) ? userContent[0].text : String(userContent);
+  assert.ok(text.includes('本地决策模型的原始判断'), '必须写明这是本地模型的原始判断');
+  assert.ok(text.includes('2.0') && text.includes('3.5'), '两套的原始分都要带上');
 });
 
 test('multimodal_only：完全不经过 Laya 打分，只由多模态给分', async () => {
@@ -335,18 +422,26 @@ test('makeReviewSystem：无 api.vision 时按 server 失败，不静默返回�
 /* ───── 真实端点踩过的坑：推理模型 content 为空串（HTTP 仍是 200） ───── */
 
 test('纠正：模型只回了空 content（推理吃光预算）→ 判 parse 失败，不产出假分数', async () => {
-  const calls = [];
+  const calls = { vision: 0 };
   const fetchImpl = async (url, init) => {
-    const body = JSON.parse(init.body);
+    const body = JSON.parse(init.body || '{}');
     if (/chat\/completions/.test(url)) {
-      calls.push(body);
-      // 这正是 deepseek-flash 在 max_tokens 过小时的真实表现：HTTP 200，content 为 ""
+      calls.vision += 1;
+      const userMessage = (body.messages || []).find((m) => m && m.role === 'user');
+      const raw = userMessage ? userMessage.content : '';
+      const text = Array.isArray(raw)
+        ? raw.filter((p) => p && p.type === 'text').map((p) => p.text).join('\n')
+        : String(raw || '');
+      const isDescribe = /客观描述/.test(text);
+      // 关键：只有**纠正**那一步返回空串。描述必须正常，否则整轮 runQuick 会比我这一步先失败，
+      // 测到的就不是"纠正返回空"这个真实故障了。
+      // 空串正是 deepseek-flash 在 max_tokens 过小时的实测表现：HTTP 200，content 为 ""。
       return {
         ok: true,
         status: 200,
         json: async () => ({
           model: 'reasoning-model',
-          choices: [{ message: { role: 'assistant', content: '' }, finish_reason: 'length' }],
+          choices: [{ message: { role: 'assistant', content: isDescribe ? DESCRIPTION : '' }, finish_reason: isDescribe ? 'stop' : 'length' }],
           usage: { prompt_tokens: 200, completion_tokens: 200, total_tokens: 400 },
         }),
       };

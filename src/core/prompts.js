@@ -143,22 +143,34 @@ export function buildReviewPrompt({ userState, question, base, lookIds, descript
   lines.push('');
 
   const ids = Array.isArray(lookIds) ? lookIds : [];
-  lines.push('本地决策模型的原始判断（仅供参考，可推翻）：');
+  // base 为空时不要输出「本地模型的原始判断」这一段，否则会骗模型（"上面没写"≠"原始分是空"）：
+  //  ① laya_review 并行档下，纠正请求与 Laya 打分同时发出，此刻还没有原始分；
+  //  ② multimodal_only 档根本没有 Laya。
+  const hasBase = !!(base && base.byLook);
+  lines.push(hasBase
+    ? '本地决策模型的原始判断（仅供参考，可推翻）：'
+    : '本次没有提供本地模型的分数，请完全依据你自己看到的画面给分：');
   for (const lookId of ids) {
     const index = lookIndex(lookId);
-    const row = base && base.byLook ? base.byLook[lookId] : null;
-    const scores = (row && row.scores) || {};
-    const parts = SCORE_QUESTION_IDS
-      .map((id) => {
-        const value = scores[id];
-        return `${SCORE_DIMENSION_LABELS[id]}=${Number.isFinite(value) ? value.toFixed(1) : '无'}`;
-      })
-      .join('，');
-    lines.push(`第 ${index} 套（${lookId}）：${parts}`);
-    // 附上客观描述，帮助模型对齐"这一套是哪一套"；但判断必须以画面为准
+    if (hasBase) {
+      const row = base.byLook[lookId];
+      const scores = (row && row.scores) || {};
+      const parts = SCORE_QUESTION_IDS
+        .map((id) => {
+          const value = scores[id];
+          return `${SCORE_DIMENSION_LABELS[id]}=${Number.isFinite(value) ? value.toFixed(1) : '无'}`;
+        })
+        .join('，');
+      lines.push(`第 ${index} 套（${lookId}）：${parts}`);
+    } else {
+      lines.push(`第 ${index} 套（${lookId}）`);
+    }
+    // 附上客观描述，帮助模型对齐"这一套是哪一套"；但判断必须以画面为准。
+    // 直接复用调用方已算好的描述文本，**不再重新解析**——重新解析会走 renderDescription，
+    // 它遇到"值里含 `；`"的正文可能截断，而原始文本本来就是完整的，没必要冒险。
     const described = descriptions && descriptions[lookId];
     if (typeof described === 'string' && described.trim()) {
-      lines.push(`  该套的客观记录：${renderDescription(described)}`);
+      lines.push(`  该套的客观记录：${described.trim()}`);
     }
   }
 

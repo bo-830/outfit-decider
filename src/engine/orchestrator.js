@@ -11,10 +11,10 @@ import { makeDeepSystem } from './deepSystem.js';
 import { makeReviewSystem } from './reviewSystem.js';
 import { makeScoreSystem } from './scoreSystem.js';
 import { makeVisionEngine } from './vision.js';
-import { rankLooks } from '../core/protocol.js';
+import { SCORE_QUESTION_IDS, rankLooks } from '../core/protocol.js';
 import { isMeaningfulDescription } from '../core/scoring.js';
-import { relevantScoreDimensions } from '../core/prompts.js';
-import { invalidInputError } from '../data/copy.js';
+import { buildReviewPrompt, relevantScoreDimensions } from '../core/prompts.js';
+import { errorFor, invalidInputError } from '../data/copy.js';
 
 const DEFAULT_WEAK_THRESHOLD_MS = 6000;
 
@@ -119,19 +119,29 @@ export function makeOrchestrator({
     //   laya_review     → Laya 打分后再由多模态纠正
     let quick;
     if (mode === 'multimodal_only') {
-      notify(onProgress, { stage: 'scoring', done: 0, total });
-      quick = await applyJudgment({
-        quick: null,
-        list,
-        descriptions,
-        userState,
-        question,
+      // 这一档完全不用 Laya：直接把纠正模型当判分模型。实现上仍是同一套
+      // 「提示词里不带原始分 → 由多模态给分」的路径，所以复用 reviewWithPrompt。
+      notify(onProgress, { stage: 'reviewing', done: 0, total: 1 });
+      const reviewed = await reviewer.reviewWithPrompt({
+        prompt: buildReviewPrompt({
+          userState,
+          question,
+          base: null,
+          lookIds: list.map((item) => item.lookId),
+          descriptions,
+        }),
+        artifacts: list,
+        lookIds: list.map((item) => item.lookId),
         signal,
-        onProgress,
-      });
-      notify(onProgress, { stage: 'scoring', done: total, total });
+      }).then(
+        (value) => ({ ok: true, value }),
+        (error) => ({ ok: false, error }),
+      );
+      quick = await applyJudgment({ quick: null, list, reviewed, signal, onProgress, question, descriptions });
+      notify(onProgress, { stage: 'reviewing', done: 1, total: 1 });
     } else {
       notify(onProgress, { stage: 'scoring', done: 0, total });
+      if (process.env.OD_DEBUG_PHASE) process.stdout.write('[orch] scoreLooks #1 start\n');
       quick = await scorer.scoreLooks({
         artifacts: list,
         descriptions,
@@ -145,15 +155,21 @@ export function makeOrchestrator({
 
       if (mode === 'laya_review') {
         notify(onProgress, { stage: 'reviewing', done: 0, total: 1 });
-        quick = await applyJudgment({
-          quick,
-          list,
+        // 串行档的纠正：Laya 原始分已经拿到，所以把它写进提示词供模型参考。
+        // （并行档——见上面 multimodal_only 分支的 reviewWithPrompt——会在打分前就把纠正请求发出去，
+        //   那一刻没有原始分，属于刻意的性能取舍。）
+        const reviewed = await reviewer.review({
+          artifacts: list,
           descriptions,
           userState,
           question,
+          base: quick,
           signal,
-          onProgress,
-        });
+        }).then(
+          (value) => ({ ok: true, value }),
+          (error) => ({ ok: false, error }),
+        );
+        quick = await applyJudgment({ quick, list, reviewed, signal, onProgress, question, descriptions });
         notify(onProgress, { stage: 'reviewing', done: 1, total: 1 });
       }
     }
@@ -168,36 +184,39 @@ export function makeOrchestrator({
    * `laya_review`：以 Laya 的原始分为**参考**重新判断，纠正失败则回退原分（不能因一次故障清空用户结果）。
    * `multimodal_only`：完全不用 Laya，直接由多模态模型给分（describe 仍用于展示客观记录）。
    */
-  async function applyJudgment({ quick, list, descriptions, userState, question, signal, onProgress }) {
-    // multimodal_only 进门时 quick 为 null（还没打过 Laya）
-    const base = mode === 'laya_review' ? quick : null;
+  /**
+   * SPEC §3.9c · 把（已经拿到的）纠正结果并进 QuickResult。
+   *
+   * `reviewed` 是 `{ok, value|error, ms}` 形态——因为纠正请求与 Laya 打分是并行的，
+   * 结果可能成功也可能失败，两者都要能落地。
+   */
+  async function applyJudgment({ quick, list, reviewed, signal, onProgress, question, descriptions }) {
     try {
-      const reviewed = await reviewer.review({
-        artifacts: list, descriptions, userState, question, base, signal,
-      });
+      if (!reviewed || reviewed.ok !== true) throw (reviewed && reviewed.error) || errorFor('server');
+      const result = reviewed.value;
       if (mode === 'multimodal_only') {
         // 全量替换：连"哪几套参与评估"都以多模态结果为准
-        const scoresByLook = new Map(Object.entries(reviewed.scores));
+        const scoresByLook = new Map(Object.entries(result.scores));
         const rows = list
           .filter((item) => scoresByLook.has(item.lookId))
           .map((item) => ({ lookId: item.lookId, scores: scoresByLook.get(item.lookId) }));
         if (!rows.length) throw invalidInput();
         return {
           ...rebuildQuick({ rows, descriptions, question, previous: quick || {} }),
-          model: reviewed.model,
-          usage: reviewed.usage,
-          reviewModel: reviewed.model,
-          reviewedAt: reviewed.reviewedAt,
-          reviewedLooks: Object.keys(reviewed.scores),
-          reviewChanged: Object.keys(reviewed.scores),
+          model: result.model,
+          usage: result.usage,
+          reviewModel: result.model,
+          reviewedAt: result.reviewedAt,
+          reviewedLooks: Object.keys(result.scores),
+          reviewChanged: Object.keys(result.scores),
         };
       }
       return {
-        ...mergeReviewedScores({ quick, reviewed, descriptions, question }),
-        reviewModel: reviewed.model,
-        reviewedAt: reviewed.reviewedAt,
-        reviewedLooks: Object.keys(reviewed.scores),
-        reviewChanged: reviewed.changed,
+        ...mergeReviewedScores({ quick, reviewed: result }),
+        reviewModel: result.model,
+        reviewedAt: result.reviewedAt,
+        reviewedLooks: Object.keys(result.scores),
+        reviewChanged: result.changed,
       };
     } catch (err) {
       // 纠正失败不清空已有结果；弱网/错误分类照旧上报，由 UI 决定怎么提示
@@ -212,21 +231,39 @@ export function makeOrchestrator({
   }
 
   /** 用纠正后的分数重建整份 QuickResult（排序、overall、置信度、relevance 全部重算）。 */
-  function mergeReviewedScores({ quick, reviewed, descriptions, question }) {
+  function mergeReviewedScores({ quick, reviewed }) {
     const rows = quick.ids.map((lookId) => {
       const next = reviewed.scores[lookId];
       const previous = quick.byLook[lookId] || { scores: {}, confidences: {} };
       return { lookId, scores: next || previous.scores, confidences: previous.confidences };
     });
-    return rebuildQuick({ rows, descriptions, question, previous: quick });
+    // 注意：这里不能再按 question 重算 relevance——按"你的问题"高亮的维度已经在
+    // Laya 打分那一步算好了，用空 question 重算会退化成"全部 6 维"，把高亮信息抹掉。
+    // 描述也原样保留（reviewed 里没有描述）。
+    return rebuildQuick({ rows, previous: quick, relevanceOverride: collectRelevance(quick) });
   }
 
-  function rebuildQuick({ rows, descriptions, question, previous }) {
-    const relevance = relevantScoreDimensions({
-      builtinId: question && question.builtinId ? question.builtinId : null,
-      text: question && typeof question.text === 'string' ? question.text : '',
-    });
-    const ranked = rankLooks(rows.map((row) => ({ ...row, relevance: [...relevance] }))).map((row) => ({
+  /** 从原结果里取回每套的 relevance（原来由 scoreSystem 算好）。 */
+  function collectRelevance(quick) {
+    const out = {};
+    for (const row of quick.ranked || []) out[row.lookId] = row.relevance || null;
+    return out;
+  }
+
+  function rebuildQuick({ rows, descriptions, question, previous, relevanceOverride }) {
+    // 只有显式给了 question 才重算 relevance；否则沿用调用方提供的（或原结果的）
+    const relevance = question
+      ? relevantScoreDimensions({
+        builtinId: question.builtinId || null,
+        text: typeof question.text === 'string' ? question.text : '',
+      })
+      : null;
+    const ranked = rankLooks(rows.map((row) => {
+      // relevance 优先级：调用方显式覆盖 > 全局重算 > 该套原有值 > 全部维度
+      const perRow = (relevanceOverride && relevanceOverride[row.lookId]) || null;
+      const list = perRow || relevance || SCORE_QUESTION_IDS;
+      return { ...row, relevance: [...list] };
+    })).map((row) => ({
       lookId: row.lookId,
       rank: row.rank,
       overall: row.scores.overall_score,

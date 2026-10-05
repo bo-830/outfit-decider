@@ -76,6 +76,9 @@ const env = (name) => (process.env[name] !== undefined && process.env[name] !== 
   ? process.env[name]
   : LOCAL_ENV[name]);
 
+/** 项目根（用于读取 fixtures 兜底描述）。 */
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
 const argv = process.argv.slice(2);
 function argValue(name, fallback) {
   const i = argv.indexOf(`--${name}`);
@@ -380,66 +383,101 @@ async function fetchJson(url, options, timeoutMs) {
   }
 }
 
-/** describe_* 走视觉端点；未配置则明确失败，不伪造描述。 */
+/**
+ * describe_* 走视觉端点；未配置则**退回夹具兜底描述**。
+ *
+ * 为什么需要兜底：App 侧 SPEC §3.7 v1.5 会把 describe 路由到"能看图的模型"，
+ * 但只配了本地 Laya、没配视觉端点的部署同样是合法配置（用 `laya_only` 档）。
+ * 那种情况下如果这里直接返回空答案，App 会在第一步就整体失败。
+ * 注意：夹具兜底的内容是**固定的示例描述**，不是真的看懂了照片——
+ * 所以会在 state 里显式标注，用户与日志都不会误以为它看过图。
+ */
 async function handleDescribe(body) {
-  if (!VISION_BASE_URL) {
-    return {
-      status: 200,
-      payload: {
-        model: 'vision-unconfigured',
-        answers: [],
-        usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
-      },
-    };
-  }
   const ids = body.questions.map((q) => String(q.id));
   const images = Array.isArray(body.images) ? body.images : [];
   const image = images[0] || null;
-  if (!image || !image.dataUri) {
-    return { status: 400, payload: { error: { message: 'no image provided' } } };
-  }
-  const messages = buildVisionMessages(body.state, body.questions[0] && body.questions[0].question);
-  messages[1].content = [
-    { type: 'text', text: (body.questions[0] && body.questions[0].question) || '请客观描述这张穿搭照片。' },
-    { type: 'image_url', image_url: { url: image.dataUri } },
-  ];
-  const result = await fetchJson(
-    `${VISION_BASE_URL}/chat/completions`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(VISION_API_KEY ? { Authorization: `Bearer ${VISION_API_KEY}` } : {}),
+
+  // ① 配了视觉端点 → 真的看图
+  if (VISION_BASE_URL) {
+    if (!image || !image.dataUri) {
+      return { status: 400, payload: { error: { message: 'no image provided' } } };
+    }
+    const messages = buildVisionMessages(body.state, body.questions[0] && body.questions[0].question);
+    messages[1].content = [
+      { type: 'text', text: (body.questions[0] && body.questions[0].question) || '请客观描述这张穿搭照片。' },
+      { type: 'image_url', image_url: { url: image.dataUri } },
+    ];
+    const result = await fetchJson(
+      `${VISION_BASE_URL}/chat/completions`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(VISION_API_KEY ? { Authorization: `Bearer ${VISION_API_KEY}` } : {}),
+        },
+        body: JSON.stringify({ model: VISION_MODEL, messages, temperature: 0.2, max_tokens: VISION_MAX_TOKENS }),
       },
-      body: JSON.stringify({ model: VISION_MODEL, messages, temperature: 0.2, max_tokens: VISION_MAX_TOKENS }),
-    },
-    60000,
-  );
-  if (result.status < 200 || result.status >= 300 || !result.json) {
-    return { status: 502, payload: { error: { message: `vision upstream HTTP ${result.status}` } } };
+      60000,
+    );
+    if (result.status < 200 || result.status >= 300 || !result.json) {
+      return { status: 502, payload: { error: { message: `vision upstream HTTP ${result.status}` } } };
+    }
+    const content = result.json.choices
+      && result.json.choices[0]
+      && result.json.choices[0].message
+      && result.json.choices[0].message.content;
+    const usage = result.json.usage || {};
+    return {
+      status: 200,
+      payload: {
+        model: VISION_MODEL,
+        answers: ids.map((id) => ({
+          id,
+          type: 'text',
+          content: typeof content === 'string' ? content : '',
+          confidence: 0.8,
+        })),
+        usage: {
+          prompt_tokens: toInt(usage.prompt_tokens),
+          completion_tokens: toInt(usage.completion_tokens),
+          total_tokens: toInt(usage.total_tokens),
+        },
+      },
+    };
   }
-  const content = result.json.choices
-    && result.json.choices[0]
-    && result.json.choices[0].message
-    && result.json.choices[0].message.content;
-  const usage = result.json.usage || {};
+
+  // ② 没配视觉端点 → 夹具兜底（显式标注，不假装看过图）
+  const lookIds = ids.map((id) => (id.match(/look[1-4]/) || ['look1'])[0]);
   return {
     status: 200,
     payload: {
-      model: VISION_MODEL,
-      answers: ids.map((id) => ({
+      model: 'fixture-fallback',
+      answers: ids.map((id, index) => ({
         id,
         type: 'text',
-        content: typeof content === 'string' ? content : '',
-        confidence: 0.8,
+        content: `（占位描述：未配置能看图的模型，以下为固定示例，不代表真实照片内容）\n${fallbackDescription(lookIds[index])}`,
+        confidence: 0.3,
       })),
-      usage: {
-        prompt_tokens: toInt(usage.prompt_tokens),
-        completion_tokens: toInt(usage.completion_tokens),
-        total_tokens: toInt(usage.total_tokens),
-      },
+      usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
     },
   };
+}
+
+/** 夹具兜底描述：复用 fixtures/descriptions 的四个样例，缺文件时给通用描述。 */
+function fallbackDescription(lookId) {
+  const file = path.join(ROOT, 'fixtures', 'descriptions', `${lookId}.json`);
+  try {
+    if (fs.existsSync(file)) {
+      const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (typeof parsed === 'string') return parsed;
+      if (parsed && typeof parsed.text === 'string') return parsed.text;
+      if (parsed && typeof parsed.content === 'string') return parsed.content;
+    }
+  } catch {
+    // 读不到就用下面的通用描述
+  }
+  return '整体风格：未清晰显示；上衣：未清晰显示；下装：未清晰显示；'
+    + '鞋履：未清晰显示；配饰：未清晰显示；身材视觉效果：未清晰显示；其他细节：未清晰显示';
 }
 
 const server = http.createServer(async (req, res) => {

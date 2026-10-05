@@ -41,8 +41,14 @@ async function runQuickWithCapture() {
     responses.push({ url: String(url), body: JSON.parse(init.body), payload: await response.clone().json() });
     return response;
   };
-  const api = makeApi({ config: { ...DEFAULT_CONFIG, model: DEFAULT_CONFIG.model }, fetchImpl: capturing });
-  const orchestrator = makeOrchestrator({ api, model: DEFAULT_CONFIG.model });
+  // 这里刻意用 laya_only：本文件测的是**System One 打分**那条链路本身
+  // （只出分、无解释文本、零图片载荷），不掺入 v1.5 的纠正步骤。
+  // 纠正链路的同类约束由 tests/review-system.test.js 覆盖。
+  const api = makeApi({
+    config: { ...DEFAULT_CONFIG, model: DEFAULT_CONFIG.model, engineMode: 'laya_only' },
+    fetchImpl: capturing,
+  });
+  const orchestrator = makeOrchestrator({ api, model: DEFAULT_CONFIG.model, engineMode: 'laya_only' });
   const quick = await orchestrator.runQuick({
     artifacts: LOOKS.map(ARTIFACT),
     userState: STATE,
@@ -79,8 +85,12 @@ test('System One 输出零解释文本：score answer 只有 id/type/score/confi
 
 test('System One 输出零解释文本：请求里没有任何 text 型问题，结果对象没有解释性键', async () => {
   const { quick, requests } = await runQuickWithCapture();
+  // 只看真正的打分请求：describe 请求也带 overall_score 的评分口径说明，
+  // 所以必须用「不含 describe_* 问题」来区分（v1.5 起 describe 不再走这条通道）
   const scoreRequests = requests.filter(
-    (call) => Array.isArray(call.body.questions) && call.body.questions.some((item) => item.id === 'overall_score'),
+    (call) => Array.isArray(call.body.questions)
+      && call.body.questions.some((item) => item.id === 'overall_score')
+      && !call.body.questions.some((item) => String(item.id).startsWith('describe_')),
   );
   assert.equal(scoreRequests.length, 4);
   for (const call of scoreRequests) {

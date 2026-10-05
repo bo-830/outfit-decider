@@ -313,7 +313,18 @@ export function makeApi({ config, fetchImpl = globalThis.fetch } = {}) {
     throw lastError || apiError('server');
   }
 
-  return { ask, health, vision };
+  /**
+   * 多模态通道是否可用（SPEC §3.9c）。
+   * vision.js 用它决定 describe 走哪条通道：配了就走 vision 看原图，没配就退回决策模型的
+   * JEv `/ask`。没有这个判断，"只配了本地决策模型"的部署会在第一步就整体失败。
+   * 注意：必须在 makeApi 闭包内定义，才能读到 settings()。
+   */
+  function visionConfigured() {
+    const cfg = settings();
+    return !!(normalizeBaseUrl(cfg.visionBaseUrl) && cfg.visionModel);
+  }
+
+  return { ask, health, vision, visionConfigured };
 }
 
 /** 把文本 + 图片组装成 OpenAI 多模态 content 数组（无图时退化为纯文本，兼容纯文本端点）。 */

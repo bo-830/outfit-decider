@@ -137,13 +137,13 @@ export default function SettingsScreen({
 
         {/* ── 二、能看图的模型（与决策模型分开的两条通道） ─────────── */}
         <View style={styles.block}>
-          <SectionLabel title="能看图的模型" meta="与决策模型分开" />
+          <SectionLabel title="能看图的模型" meta="与决策模型分开" dim={visionIdle} />
           <Text style={styles.groupSub}>
             本地模型看不了照片。这一组负责把照片变成描述、并在需要时纠正分数。
           </Text>
 
           {visionIdle ? (
-            <Text testID="vision-idle-hint" style={styles.groupIdle}>
+            <Text testID="vision-idle-hint" style={styles.groupIdleTag}>
               当前档位用不到这一组
             </Text>
           ) : null}
@@ -156,73 +156,71 @@ export default function SettingsScreen({
             </View>
           ) : null}
 
-          <View style={visionIdle ? styles.groupDim : null}>
-            <Field
-              label="baseUrl"
-              meta="OpenAI 兼容端点"
-              testID="engine-vision-baseurl"
-              value={config.visionBaseUrl}
-              onChangeText={(visionBaseUrl) => patch({ visionBaseUrl })}
-              placeholder="https://api.deepseek.com/v1"
-              keyboardType="url"
-            />
-            <Field
-              label="模型名"
-              meta="填服务端认的名字"
-              testID="engine-vision-model"
-              value={config.visionModel}
-              onChangeText={(visionModel) => patch({ visionModel })}
-              placeholder="deepseek-flash"
-            />
-            <Field
-              label="API Key"
-              meta="与决策模型的 Key 分开"
-              testID="engine-vision-key"
-              value={draftVisionKey}
-              onChangeText={(text) => {
-                setDraftVisionKey(text);
-                setVisionKeySaved(false);
-              }}
-              placeholder="sk-…"
-              secure
-            />
-            <Pressable
-              testID="btn-save-vision-key"
-              accessibilityRole="button"
-              onPress={async () => {
-                if (typeof onSaveVisionKey === 'function') await onSaveVisionKey(draftVisionKey);
-                setVisionKeySaved(true);
-              }}
-              style={({ pressed }) => [styles.secondary, pressed && styles.pressed]}
-            >
-              <Text style={styles.secondaryText}>{visionKeySaved ? '已保存' : '保存 Key'}</Text>
-            </Pressable>
-            <Text style={styles.note}>
-              {keySecure
-                ? '已存进系统钥匙串（SecureStore），和决策模型的 Key 互不影响。'
-                : '当前设备只能用明文存储（AsyncStorage），请只在可信设备上填写。'}
-            </Text>
+          <Field
+            label="baseUrl"
+            meta="OpenAI 兼容端点"
+            testID="engine-vision-baseurl"
+            value={config.visionBaseUrl}
+            onChangeText={(visionBaseUrl) => patch({ visionBaseUrl })}
+            placeholder="https://api.deepseek.com/v1"
+            keyboardType="url"
+          />
+          <Field
+            label="模型名"
+            meta="填服务端认的名字"
+            testID="engine-vision-model"
+            value={config.visionModel}
+            onChangeText={(visionModel) => patch({ visionModel })}
+            placeholder="deepseek-flash"
+          />
+          <Field
+            label="API Key"
+            meta="与决策模型的 Key 分开"
+            testID="engine-vision-key"
+            value={draftVisionKey}
+            onChangeText={(text) => {
+              setDraftVisionKey(text);
+              setVisionKeySaved(false);
+            }}
+            placeholder="sk-…"
+            secure
+          />
+          <Pressable
+            testID="btn-save-vision-key"
+            accessibilityRole="button"
+            onPress={async () => {
+              if (typeof onSaveVisionKey === 'function') await onSaveVisionKey(draftVisionKey);
+              setVisionKeySaved(true);
+            }}
+            style={({ pressed }) => [styles.secondary, pressed && styles.pressed]}
+          >
+            <Text style={styles.secondaryText}>{visionKeySaved ? '已保存' : '保存 Key'}</Text>
+          </Pressable>
+          <Text style={styles.note}>
+            {keySecure
+              ? '已存进系统钥匙串（SecureStore），和决策模型的 Key 互不影响。'
+              : '当前设备只能用明文存储（AsyncStorage），请只在可信设备上填写。'}
+          </Text>
 
-            <Pressable
-              testID="btn-test-vision"
-              accessibilityRole="button"
-              onPress={onTestVision}
-              disabled={testingVision}
-              style={({ pressed }) => [styles.secondary, pressed && styles.pressed, testingVision && styles.disabled]}
-            >
-              <Text style={styles.secondaryText}>{testingVision ? '测试中…' : '测试这一组'}</Text>
-            </Pressable>
-            <View testID="test-vision-result" style={styles.connBox}>
-              {visionConn ? (
-                <Text style={[styles.connText, visionConn.ok ? styles.connOk : styles.connBad]}>
-                  {visionConn.ok
-                    ? `已连通 · ${visionConn.detail} · 用时 ${visionConn.ms}ms`
-                    : `连不上：${visionConn.detail}`}
-                </Text>
-              ) : (
-                <Text style={styles.connIdle}>还没测过。点上面的按钮试一次。</Text>
-              )}
-            </View>
+          <Pressable
+            testID="btn-test-vision"
+            accessibilityRole="button"
+            onPress={onTestVision}
+            disabled={testingVision}
+            style={({ pressed }) => [styles.secondary, pressed && styles.pressed, testingVision && styles.disabled]}
+          >
+            <Text style={styles.secondaryText}>{testingVision ? '测试中…' : '测试这一组'}</Text>
+          </Pressable>
+          <View testID="test-vision-result" style={styles.connBox}>
+            {visionConn ? (
+              <Text style={[styles.connText, visionConn.ok ? styles.connOk : styles.connBad]}>
+                {visionConn.ok
+                  ? `${visionConn.detail} · 用时 ${visionConn.ms}ms`
+                  : `连不上：${visionConn.detail}`}
+              </Text>
+            ) : (
+              <Text style={styles.connIdle}>还没测过。点上面的按钮试一次。</Text>
+            )}
           </View>
         </View>
 
@@ -379,14 +377,21 @@ const styles = StyleSheet.create({
   sub: { fontFamily: SANS, fontSize: font.small, lineHeight: 20, color: colors.textDim, marginTop: space.sm - 2 },
   block: { marginTop: space.xl - 4, paddingHorizontal: layout.padX },
   groupSub: { fontFamily: SANS, fontSize: font.small, lineHeight: 20, color: colors.textDim, marginBottom: space.md },
-  groupIdle: {
+  // 弱化不用 opacity：整组降到 55% 会把标签文字压到 ~2.25:1（低于 AA）。
+  // 改用「未启用」标记 + 标题降为次级墨色，输入仍然可读、可预配置。
+  groupIdleTag: {
+    alignSelf: 'flex-start',
+    marginBottom: space.md,
+    paddingHorizontal: space.sm,
+    paddingVertical: 3,
+    borderRadius: radius.pill,
+    backgroundColor: colors.surfaceAlt,
+    color: colors.textDim,
     fontFamily: SANS,
     fontSize: font.tiny + 0.5,
-    lineHeight: 17,
-    color: colors.textDim,
-    marginBottom: space.md,
+    fontWeight: '600',
+    overflow: 'hidden',
   },
-  groupDim: { opacity: 0.55 },
   warnBox: {
     marginBottom: space.md,
     paddingHorizontal: space.md,

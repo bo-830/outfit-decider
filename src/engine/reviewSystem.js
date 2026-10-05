@@ -20,13 +20,36 @@ export function makeReviewSystem({ api } = {}) {
   /**
    * 用多模态模型重新判断各套的 6 维分数。
    *
+   * 两种调用形态：
+   *   A) `review({..., base})` —— 自己构造提示词（标准路径）
+   *   B) `reviewWithPrompt({prompt, images, lookIds, base})` —— 用调用方**提前构造好**的提示词。
+   *      存在的理由：纠正只需要「图片 + 描述 + Laya 原始分」，而 Laya 原始分在提示词里只是参考文本。
+   *      让调用方在 Laya 打分的同时就把纠正请求发出去，两者并行，能省掉一整段串行等待
+   *      （实测 describe 约 8s、Laya 打分约 1.4s、纠正约 5s，串行 vs 并行的差别很实在）。
+   *
    * @returns Promise<{
    *   scores: Record<string, Record<string, number>>,   // lookId → 6 维分数
    *   model: string, usage: object, reviewedAt: number, changed: string[],
    * }>
    */
   async function review({ artifacts, descriptions, userState, question, base, signal } = {}) {
+    const list = (Array.isArray(artifacts) ? artifacts : []).filter((item) => item && item.lookId);
+    if (!list.length) throw errorFor('invalid_input');
+    const lookIds = list.map((item) => item.lookId);
+    const prompt = buildReviewPrompt({ userState, question, base, lookIds, descriptions });
+    return reviewWithPrompt({ prompt, artifacts: list, lookIds, base, signal });
+  }
+
+  /** 形态 B：提示词由调用方提供（用于与 Laya 打分并行）。 */
+  async function reviewWithPrompt({ prompt, artifacts, lookIds, base, signal } = {}) {
     if (!api || typeof api.vision !== 'function') throw errorFor('server');
+    // 必须显式校验多模态通道已配置：否则 api.vision 会因缺少 baseUrl 而抛 network，
+    // 更糟的是**在某些实现对端上会被当成普通打分请求**（实测：未配 vision 时
+    // 这 4 次纠正请求会退化成 6 维打分请求打到决策模型，白花一倍算力还不报错）。
+    // §3.9c 要求这种情形明确报 vision_unconfigured，让界面能指路到设置页。
+    if (typeof api.visionConfigured === 'function' && !api.visionConfigured()) {
+      throw errorFor('vision_unconfigured');
+    }
     const list = (Array.isArray(artifacts) ? artifacts : []).filter((item) => item && item.lookId);
     if (!list.length) throw errorFor('invalid_input');
 
@@ -39,8 +62,7 @@ export function makeReviewSystem({ api } = {}) {
       .filter((item) => typeof item.dataUri === 'string' && item.dataUri.startsWith('data:'));
     if (!images.length) throw errorFor('server');
 
-    const lookIds = list.map((item) => item.lookId);
-    const prompt = buildReviewPrompt({ userState, question, base, lookIds, descriptions });
+    const ids = Array.isArray(lookIds) && lookIds.length ? lookIds : list.map((item) => item.lookId);
     const response = await api.vision({
       system: REVIEW_SYSTEM_PROMPT,
       content: prompt,
@@ -53,8 +75,8 @@ export function makeReviewSystem({ api } = {}) {
     const raw = answer && typeof answer.content === 'string' ? answer.content : '';
     if (!raw.trim()) throw errorFor('parse');
 
-    const scores = parseReviewScores(raw, lookIds);
-    const changed = lookIds.filter((lookId) => hasScoreDelta(base, scores, lookId));
+    const scores = parseReviewScores(raw, ids);
+    const changed = ids.filter((lookId) => hasScoreDelta(base, scores, lookId));
     return {
       scores,
       model: response.model,
@@ -65,7 +87,7 @@ export function makeReviewSystem({ api } = {}) {
     };
   }
 
-  return { review };
+  return { review, reviewWithPrompt };
 }
 
 /** {mime, base64} → data URI；缺任一项返回 ''（调用方据此判失败，不再往下走）。 */
