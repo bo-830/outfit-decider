@@ -82,15 +82,19 @@ cmd /c "npx expo start --lan"
 本机已装好真实的 Laya 决策模型（不是 mock）：
 
 ```powershell
-# ① 决策模型（laya-serve，监听 0.0.0.0:8000；加载约 30–60s）
-C:\博830\vibecoding\laya-service\start-laya.cmd
+# 一键起两个服务（两个窗口）
+C:\博830\vibecoding\outfit-decider\tools\start-all.cmd
 
-# ② 协议适配器（App 契约 8787 → Laya 契约 8000；同时补上 Laya 缺失的 CORS）
+# 或者分开起：
+C:\博830\vibecoding\laya-service\start-laya.cmd      # ① 决策模型 0.0.0.0:8000（加载约 30–60s）
 cd C:\博830\vibecoding\outfit-decider
-cmd /c "npm run laya"
+cmd /c "npm run laya"                                 # ② 协议适配器 0.0.0.0:8787
 ```
 
-设置页填：
+`start-all.cmd` 会自动起 laya-serve（新窗口）、等 20s、再起适配器。
+
+**适配器会自己读取项目根的 `.env.local`**（已 gitignore，绝不入库），所以多模态端点与 Key
+只需配一次、由适配器在服务端使用。设置页填：
 
 | 字段 | 值 |
 |---|---|
@@ -99,14 +103,19 @@ cmd /c "npm run laya"
 | askPath / healthPath | `/ask` / `/health`（默认值即可） |
 | model | 留空或随意；适配器让 Laya 自己路由检查点 |
 
+> **设置页里「能看图的模型」那一组在直连本机适配器时可以不填。**
+> 因为适配器已经用 `.env.local` 里的 `VISION_*` 在服务端完成了图片描述与纠正；
+> 只有当你让 App **绕过适配器直连 DeepSeek** 时，才需要在设置页填 vision baseUrl/model/key。
+
 **为什么不能把 baseUrl 直接指向 8000**：① 协议形状不同（Laya 的 `questions`/`answers` 是对象、
 字段叫 `instructions`/`criteria`）；② `laya-serve` 不返回 CORS 头，浏览器端会被同源策略拦掉。
-适配器（`tools/laya-adapter.mjs`，17 条翻译单测）同时解决这两件事。
+适配器（`tools/laya-adapter.mjs`）同时解决这两件事，并在未配视觉端点时用夹具占位描述兜底
+（会显式标注"占位描述"，不假装看过图）。
 
 > ⚠️ **务必读** `C:\博830\vibecoding\laya-service\README.md` §4：
-> 本机 Laya 的**判断力实测不合格**（得体穿搭 vs 荒谬穿搭的综合分差只有 0.4，且"场合适配度"方向是反的）。
-> 它作为**基础设施**完全可用（确定性、协议正确、离线、约 1s），但**不适合作为"哪套最好"的权威排序依据**。
-> 复现命令：`node tools/laya-chain-eval.mjs`。
+> 本机 Laya **单独**判断穿搭的能力实测不合格（得体 vs 荒谬的综合分差只有 0.4，场场合适配度方向还是反的）。
+> 所以本项目用「Laya 打分 + 多模态纠正」的分工，并把「结论来自谁」标在结果页上。
+> 复现命令：`node tools/laya-chain-eval.mjs`（Laya 单独）与 `node tools/laya-real-review-eval.mjs`（含纠正）。
 
 ### 2.1 Laya 本地模型：分步部署引导（首次使用时应看到同一份内容）
 
