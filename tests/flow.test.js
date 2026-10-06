@@ -4,10 +4,13 @@ import assert from 'node:assert/strict';
 
 import {
   FLOW_PHASES,
+  SYSTEM_MODES,
   flowReducer,
   initialFlowState,
+  normalizeSystemMode,
   selectDeepFor,
   selectRankedLooks,
+  selectResultLooks,
 } from '../src/core/flow.js';
 
 const reduce = (state, action) => flowReducer(state, action);
@@ -290,4 +293,96 @@ test('selectRankedLooks / selectDeepFor', () => {
   assert.equal(selectDeepFor({ deep: { look1: REPORT } }, 'look3'), null);
   assert.equal(selectDeepFor({}, 'look1'), null);
   assert.equal(selectDeepFor(null, 'look1'), null);
+});
+
+/* ── SPEC §3.13 v1.7 · 用户自选跑哪个系统（不再强制先 System One） ─────── */
+
+test('normalizeSystemMode：三档都认，非法值一律回退 quick', () => {
+  assert.equal(normalizeSystemMode('quick'), 'quick');
+  assert.equal(normalizeSystemMode('deep'), 'deep');
+  assert.equal(normalizeSystemMode('both'), 'both');
+  // 回退语义：宁可跑最便宜的 System One，也不要因为一个错值而什么都不跑
+  assert.equal(normalizeSystemMode(undefined), 'quick');
+  assert.equal(normalizeSystemMode(null), 'quick');
+  assert.equal(normalizeSystemMode(''), 'quick');
+  assert.equal(normalizeSystemMode('DEEP'), 'quick', '大小写不匹配 → 回退，不做隐式转换');
+  assert.equal(normalizeSystemMode('two'), 'quick');
+  assert.equal(normalizeSystemMode(0), 'quick');
+  assert.equal(normalizeSystemMode({}), 'quick');
+});
+
+test('normalizeSystemMode：任何输入都只可能得到 SYSTEM_MODES 里的值', () => {
+  const inputs = ['quick', 'deep', 'both', 'laya', 'one', 1, true, [], {}, NaN, undefined, null];
+  for (const input of inputs) {
+    assert.ok(SYSTEM_MODES.includes(normalizeSystemMode(input)), `${String(input)} 返回了非法档位`);
+  }
+});
+
+/* ── SPEC §3.13b · deep-only 时结果页要展示什么 ─────────────────── */
+
+test('selectResultLooks：有快速分时原样返回（不动 System One 的口径）', () => {
+  const state = reduce(initialFlowState, {
+    type: 'QUICK_DONE',
+    ranked: [{ lookId: 'look1', rank: 1, overall: 4.2, scores: { overall_score: 4.2 } }],
+    usage: null,
+    model: 'm',
+  });
+  const looks = selectResultLooks(state);
+  assert.equal(looks.length, 1);
+  assert.equal(looks[0].overall, 4.2);
+  assert.equal(looks[0].source, undefined, '有 quick 时不得被标成 deep');
+});
+
+test('selectResultLooks：只有深度报告时回落到 System Two，并标注 source=deep', () => {
+  // 这是"用户直接选深度分析"的那一轮：flow.quick 为空，但报告齐全。
+  // 修复前结果页会显示「还没有分数」空态（实测缺口）。
+  const report = {
+    ranking: [
+      { lookId: 'look1', stars: 4.5, oneLineReason: 'a' },
+      { lookId: 'look2', stars: 2, oneLineReason: 'b' },
+    ],
+    details: [],
+    conclusion: { pick: 'look1' },
+  };
+  let state = reduce(initialFlowState, { type: 'DEEP_DONE', report, lookId: 'look1' });
+  state = reduce(state, { type: 'DEEP_DONE', report, lookId: 'look2' });
+
+  const looks = selectResultLooks(state);
+  assert.equal(looks.length, 2, 'deep-only 也要给出套列表，不能是空态');
+  assert.deepEqual(looks.map((l) => l.lookId), ['look1', 'look2'], '按星级降序');
+  assert.deepEqual(looks.map((l) => l.rank), [1, 2]);
+  assert.equal(looks[0].overall, 4.5, '要用报告的 stars 作为显示分');
+  assert.equal(looks[1].overall, 2);
+  assert.equal(looks[0].source, 'deep', '必须如实标注来源，别让它看起来像六维分');
+  assert.deepEqual(looks[0].scores, {}, '深度分析没有六维分，不得伪造');
+});
+
+test('selectResultLooks：没有任何结果时返回空数组（让空态正常出现）', () => {
+  assert.deepEqual(selectResultLooks(initialFlowState), []);
+  assert.deepEqual(selectResultLooks(null), []);
+  assert.deepEqual(selectResultLooks({}), []);
+  assert.deepEqual(selectResultLooks({ deep: {} }), []);
+});
+
+test('selectResultLooks：报告缺 ranking / stars 非数值时排到末尾，不抛错', () => {
+  let state = reduce(initialFlowState, { type: 'DEEP_DONE', report: { ranking: [], details: [], conclusion: {} }, lookId: 'look1' });
+  state = reduce(state, { type: 'DEEP_DONE', report: { ranking: [{ lookId: 'look2', stars: 3 }], details: [], conclusion: {} }, lookId: 'look2' });
+  const looks = selectResultLooks(state);
+  assert.equal(looks.length, 2);
+  assert.equal(looks[0].lookId, 'look2', '有星级的排前面');
+  assert.equal(looks[1].overall, null, '没有星级 → null，不编造分数');
+});
+
+test('SET_ARTIFACTS 是"替换"语义：追加必须由调用方算好再传（防"分次选图互相冲掉"）', () => {
+  const one = [{ lookId: 'look1', mime: 'image/jpeg', base64: 'a' }];
+  const two = [...one, { lookId: 'look2', mime: 'image/jpeg', base64: 'b' }];
+  const afterFirst = flowReducer(initialFlowState, { type: 'SET_ARTIFACTS', artifacts: one });
+  assert.equal(afterFirst.artifacts.length, 1);
+  // 传整份 → 得到整份（App.jsx 负责把已有的拼进来，这就是"分次选图"的正确接法）
+  const afterSecond = flowReducer(afterFirst, { type: 'SET_ARTIFACTS', artifacts: two });
+  assert.equal(afterSecond.artifacts.length, 2);
+  assert.deepEqual(afterSecond.artifacts.map((a) => a.lookId), ['look1', 'look2']);
+  // 只传新的那个 → 就是替换（旧图消失）；这正是"只能上传一张"的成因，故需测试固定该语义
+  const replaced = flowReducer(afterSecond, { type: 'SET_ARTIFACTS', artifacts: one });
+  assert.deepEqual(replaced.artifacts.map((a) => a.lookId), ['look1']);
 });

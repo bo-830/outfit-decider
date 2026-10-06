@@ -5,7 +5,8 @@
 
 版本：v1.6（v1 = Phase 0 冻结；v1.1 §2.1 三个设置页 testID；v1.2 §7.0 门禁命令形式；
 v1.3 §3.7 describe 必须带图、§2.1 `ranked[].scores`；v1.4 §5.1 重试口径与时间预期；
-v1.5 §3.9b 多模态纠正、§3.9c 三档引擎模式；v1.6 §3.11b 批处理打分、§3.11c 设置页配置顺序） · 适用范围：`src/core/**`、`src/data/**`、`src/engine/**`、`src/store/**`、
+v1.5 §3.9b 多模态纠正、§3.9c 三档引擎模式；v1.6 §3.11b 批处理打分、§3.11c 设置页配置顺序；
+v1.7 §3.13b 用户自选 System One / System Two） · 适用范围：`src/core/**`、`src/data/**`、`src/engine/**`、`src/store/**`、
 `src/ui/theme.js`、`src/components/**`、`src/screens/**`、`App.jsx`、`tools/**`、`tests/**`
 
 ---
@@ -163,6 +164,7 @@ export const BUILTIN_QUESTIONS = [
 | `testID="engine-vision-baseurl"` / `"engine-vision-model"` / `"engine-vision-key"` | 设置页：多模态端点（describe 与纠正用），与决策模型分开配置 |
 | `testID="vision-server-side"` / `"vision-readiness"` | 设置页（v1.6）：视觉模型已配在服务端 / 就绪状态标记 |
 | `testID="decision-gate-hint"` / `"decision-gate-jump"` | 设置页（v1.6）：决策模型的配置闸门提示与跳转（视觉未就绪时禁用决策组） |
+| `testID="system-mode-quick"` / `"system-mode-deep"` / `"system-mode-both"` | 选图页（v1.7）：用户自选跑 System One / System Two / 两个都要 |
 | `testID="engine-badge"` | 结果页：本次结论来自哪一档引擎（文案见 §3.9c） |
 | `testID="probe-json"` | 隐藏节点（`<Text>` 或 `<div>`），内容 = `window.__OD_PROBE__` 的 JSON 序列化，供冒烟脚本读取 |
 | `window.__OD_PROBE__` | 运行状态探针：`{ ready, tab, looks, quick: {ranked: [{lookId, rank, overall, scores}]}, deep, errors: [], lastRequest: {...} | null, privacy: { imageInStorage: bool } }`。`ranked[].scores` 为 6 维分数（v1.3 补入契约，供冒烟脚本仅凭 probe 即可交叉校验；权威证据仍是线上响应 + DOM 的 6 行 `dim-row`） |
@@ -527,6 +529,31 @@ export function loadApiKey()        // → Promise<{key, secure: boolean}>
 export function clearApiKey()
 export function isSecureStorageAvailable()   // → Promise<bool>
 ```
+
+### 3.13b 用户自选跑哪个系统（v1.7 新增）
+
+**两个系统是并列的，不是串行流程。** System One 出 6 维分数，System Two 出三段式深度报告，
+且深度分析**自带排序**、不依赖快速分，因此必须允许单独跑。用户明确提出：
+「system one 和 system two 应该让用户自己选择，而不是先 system one 再 system two」。
+
+契约：
+
+```js
+// src/core/flow.js（纯逻辑，可单测）
+export const SYSTEM_MODES = ['quick', 'deep', 'both'];
+export function normalizeSystemMode(value);   // -> 'quick' | 'deep' | 'both'，非法值回退 'quick'
+```
+
+- 选图页 CTA 上方给三档选择：`system-mode-quick` / `system-mode-deep` / `system-mode-both`。
+- **默认 `'quick'`**：原始需求要求默认优先执行 System One 快速决策流程，且它最便宜。
+- 分派规则：
+  - `quick` → 只跑 System One（`submit-quick` 的 testID 与主文案保持不变，验收依赖它）；
+  - `deep` → 只跑 System Two，**对所有已选图片跑一次**（`startDeep(null)`），报告分发到每套；
+    不需要先有快速分；
+  - `both` → 先 System One，**成功后**再自动接 System Two。
+- **`deep` 必须有图**：无图时 CTA 禁用，提示要说清"深度分析需要先选照片"（不能用通用话术）。
+- `deep` 档的加载文案必须与 `quick` 区分（深度分析实测约 18–25 秒，比快速慢一个量级）。
+- `normalizeSystemMode` 非法值回退 `'quick'`：宁可跑最便宜的那个，也不要因为一个错值什么都不跑。
 
 ### 3.14 `src/ui/theme.js`（视觉令牌，`docs/DESIGN.md` 与之逐字对应）
 

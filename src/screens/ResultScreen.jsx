@@ -1,7 +1,7 @@
 import React from 'react';
 import { ScrollView, StyleSheet, Text, View, Pressable } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { selectRankedLooks } from '../core/flow.js';
+import { selectRankedLooks, selectResultLooks } from '../core/flow.js';
 import { colors, font, HIT, layout, radius, space } from '../ui/theme';
 import { SANS } from '../ui/platform';
 import EmptyState from '../components/EmptyState.jsx';
@@ -32,7 +32,11 @@ export default function ResultScreen({
   engineMode = null,
 }) {
   const insets = useSafeAreaInsets();
-  const ranked = selectRankedLooks(flow);
+  // SPEC §3.13b：优先 System One；只跑了深度分析时回落到 System Two 的报告，
+  // 否则会出现"deep 跑完了却显示还没有分数"的空态（实测缺口）。
+  const ranked = selectResultLooks(flow);
+  const quickRanked = selectRankedLooks(flow);
+  const deepOnly = !quickRanked.length && ranked.length > 0;
   const running = flow.phase === 'describing' || flow.phase === 'scoring' || flow.phase === 'deep_running';
   const focusLookId = expandedLookId || (ranked[0] ? ranked[0].lookId : null);
   const deepReports = flow.deep || {};
@@ -57,9 +61,26 @@ export default function ResultScreen({
       contentContainerStyle={[styles.content, { paddingBottom: Math.max(insets.bottom, space.lg) + space.xl }]}
     >
       <View style={styles.head}>
-        <Text style={styles.h1}>{ranked.length ? `${ranked.length} 套排名` : '结果'}</Text>
-        <Text style={styles.sub}>{ranked.length ? '按综合分从高到低' : '跑完快速评分后，这里会给出排名'}</Text>
+        <Text style={styles.h1}>
+          {ranked.length ? `${ranked.length} 套${deepOnly ? '深度排名' : '排名'}` : '结果'}
+        </Text>
+        <Text style={styles.sub}>
+          {deepOnly
+            ? '按深度分析的星级从高到低（本次没有跑快速评分）'
+            : ranked.length
+              ? '按综合分从高到低'
+              : '跑完快速评分或深度分析后，这里会给出排名'}
+        </Text>
       </View>
+
+      {/* 只跑深度分析时必须如实标注来源，否则用户会以为这是 System One 的六维分 */}
+      {deepOnly ? (
+        <View testID="deep-only-note" style={styles.deepOnlyNote}>
+          <Text style={styles.deepOnlyText}>
+            本次只跑了深度分析。下面是 System Two 的判断（星级），没有六维分数；想拿分数请回上传页选「快速评分」。
+          </Text>
+        </View>
+      ) : null}
 
       {flow.weakNetwork ? <WeakNetBanner onSwitchToQuick={onSwitchToQuick} /> : null}
       {flow.error ? (
@@ -101,7 +122,10 @@ export default function ResultScreen({
         />
       ) : (
         <View>
-          <NameplateRow left="名次 · 穿搭 · 综合分" right={`${scoredCount}/${ranked.length} 套有效`} />
+          <NameplateRow
+            left={deepOnly ? '名次 · 穿搭 · 深度星级' : '名次 · 穿搭 · 综合分'}
+            right={deepOnly ? `${ranked.length} 套有报告` : `${scoredCount}/${ranked.length} 套有效`}
+          />
 
           {ranked.map((look) => (
             <ResultCard
@@ -117,24 +141,30 @@ export default function ResultScreen({
             />
           ))}
 
-          <ToggleRow
-            testID="compare-toggle"
-            title="双系统同屏对比"
-            sub="左边看分数，右边看报告"
-            value={flow.compareOpen}
-            onValueChange={() => dispatch({ type: 'TOGGLE_COMPARE' })}
-          />
+          {/* 双系统对比要有两个系统才成立：只跑了深度分析时没有"左边分数"可比，
+              所以这一档整块不渲染，避免给一个永远比不出东西的开关。 */}
+          {deepOnly ? null : (
+            <>
+              <ToggleRow
+                testID="compare-toggle"
+                title="双系统同屏对比"
+                sub="左边看分数，右边看报告"
+                value={flow.compareOpen}
+                onValueChange={() => dispatch({ type: 'TOGGLE_COMPARE' })}
+              />
 
-          {flow.compareOpen ? (
-            <CompareView
-              ranked={ranked}
-              artifacts={artifacts}
-              deepReports={deepReports}
-              focusLookId={focusLookId}
-              deepBusy={deepBusyLook !== null}
-              onDeep={onDeep}
-            />
-          ) : null}
+              {flow.compareOpen ? (
+                <CompareView
+                  ranked={ranked}
+                  artifacts={artifacts}
+                  deepReports={deepReports}
+                  focusLookId={focusLookId}
+                  deepBusy={deepBusyLook !== null}
+                  onDeep={onDeep}
+                />
+              ) : null}
+            </>
+          )}
         </View>
       )}
 
@@ -175,4 +205,16 @@ const styles = StyleSheet.create({
   staleText: { flex: 1, fontFamily: SANS, fontSize: font.small, color: colors.warn },
   staleBtn: { minHeight: HIT, justifyContent: 'center', paddingLeft: space.sm },
   staleAction: { fontFamily: SANS, fontSize: font.small, fontWeight: '600', color: colors.accent },
+  // 只跑了深度分析时的来源说明：中性说明，不用警告色（这不是错误，是另一种用法）
+  deepOnlyNote: {
+    marginHorizontal: layout.padX,
+    marginBottom: space.md,
+    paddingVertical: space.sm,
+    paddingHorizontal: space.md,
+    borderRadius: radius.md,
+    backgroundColor: colors.surfaceAlt,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  deepOnlyText: { fontFamily: SANS, fontSize: font.small, color: colors.textDim, lineHeight: 20 },
 });

@@ -10,6 +10,21 @@
 import { BUILTIN_QUESTIONS } from '../data/options.js';
 import { emptyUserState, toggle } from './state.js';
 
+/**
+ * SPEC §3.13 v1.7 · 用户这次要跑哪个系统。
+ *
+ * 两个系统是**并列**的：System One 出 6 维分数，System Two 出三段式深度报告；
+ * 深度分析自带排序、不依赖快速分，所以必须允许单独跑（用户明确提出）。
+ *
+ * 非法/缺失值一律回退 'quick'：需求原文要求默认优先走 System One，且它最便宜；
+ * 宁可跑便宜的那个，也不要因为一个错值而什么都不跑。
+ */
+export const SYSTEM_MODES = ['quick', 'deep', 'both'];
+
+export function normalizeSystemMode(value) {
+  return SYSTEM_MODES.includes(value) ? value : 'quick';
+}
+
 export const FLOW_PHASES = [
   'idle',
   'describing',
@@ -42,6 +57,9 @@ export function flowReducer(state, action) {
 
   switch (type) {
     case 'SET_ARTIFACTS': {
+      // 语义：**替换**为给定的整份图片列表（调用方负责把"追加"算好再传进来）。
+      // 分次选图的追加逻辑在 App.jsx（它能看到当前 artifacts 与已用 lookId）；
+      // 这里只管状态一致性：换图会作废本次结果与描述。
       const artifacts = Array.isArray(action.artifacts) ? action.artifacts.slice() : [];
       const changed = !sameLookIds(current.artifacts, artifacts);
       if (!changed) return { ...current, artifacts };
@@ -197,6 +215,58 @@ export function selectDeepFor(state, lookId) {
   const deep = state && state.deep;
   if (!deep || typeof deep !== 'object') return null;
   return deep[lookId] || null;
+}
+
+/**
+ * SPEC §3.13b v1.7 · 结果页要展示的"套"列表 —— **优先 System One，缺失时回落到 System Two**。
+ *
+ * 为什么需要它：用户可以直接只跑深度分析（`systemMode='deep'`），那时 `flow.quick` 是空的，
+ * 而深度报告挂在结果卡片里、卡片又只按 `flow.quick.ranked` 渲染 →
+ * 跑完 deep 却看到「还没有分数」的空态（实测缺口）。
+ *
+ * 回落时把深度报告的 `stars`（0-5，System Two 的判断）映射成卡片的 `overall` 显示值。
+ * **必须同时把 `source` 标成 'deep'**，让界面如实标注"这个结论来自深度分析"，
+ * 绝不能让它看起来像是 System One 的六维分（那会混淆两个系统的口径）。
+ */
+export function selectResultLooks(state) {
+  const quickRanked = selectRankedLooks(state);
+  if (quickRanked.length) return quickRanked;
+
+  const reports = state && state.deep;
+  if (!reports || typeof reports !== 'object') return [];
+
+  // 以各报告自己的 ranking 定序与定星（报告自带排序，不依赖 quick）
+  const seen = new Set();
+  const looks = [];
+  for (const lookId of Object.keys(reports)) {
+    const report = reports[lookId];
+    if (!report || typeof report !== 'object' || seen.has(lookId)) continue;
+    seen.add(lookId);
+
+    let stars = null;
+    const ranking = Array.isArray(report.ranking) ? report.ranking : [];
+    const row = ranking.find((item) => item && item.lookId === lookId) || ranking[0];
+    if (row && Number.isFinite(row.stars)) stars = row.stars;
+
+    looks.push({
+      lookId,
+      rank: null, // 下面按 stars 重排后再填
+      overall: stars,
+      scores: {}, // 深度分析没有六维分，不伪造
+      relevance: null,
+      source: 'deep',
+    });
+  }
+  if (!looks.length) return [];
+
+  // 与 SPEC §3.3 同口径：按分数降序，null 最后，同分按 lookId 升序
+  looks.sort((a, b) => {
+    const av = a.overall === null ? -1 : a.overall;
+    const bv = b.overall === null ? -1 : b.overall;
+    if (bv !== av) return bv - av;
+    return String(a.lookId).localeCompare(String(b.lookId));
+  });
+  return looks.map((look, index) => ({ ...look, rank: index + 1 }));
 }
 
 function freshInitialState() {

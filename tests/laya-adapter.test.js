@@ -6,7 +6,10 @@ import assert from 'node:assert/strict';
 import {
   SCORE_INSTRUCTIONS,
   SCORE_RUBRICS,
+  buildVisionMessages,
+  isDeepRequest,
   isDescribeRequest,
+  isReviewRequest,
   sceneOf,
   toAppAnswer,
   toAppResponse,
@@ -99,6 +102,50 @@ test('isDescribeRequest：只在全部是 describe_* 时判定为图片转文字
   assert.equal(isDescribeRequest([{ id: 'describe_look1' }, { id: 'overall_score' }]), false);
   assert.equal(isDescribeRequest(APP_QUESTIONS), false);
   assert.equal(isDescribeRequest([]), false);
+});
+
+/* ── 适配器必须认出的三条多模态通道 ──────────────────────────────
+   漏判 = 该请求被当成"打分"转发给 Laya，返回分数而不是文本，
+   App 侧表现为「模型返回的内容看不懂」或纠正静默失效（deep 与 review 都实测踩过）。 */
+
+test('isDeepRequest：识别 System Two，不与 review / describe 混淆', () => {
+  assert.equal(isDeepRequest([{ id: 'deep_report' }]), true);
+  assert.equal(isDeepRequest([{ id: 'review' }]), false);
+  assert.equal(isDeepRequest([{ id: 'describe_look1' }]), false);
+  assert.equal(isDeepRequest(APP_QUESTIONS), false);
+  assert.equal(isDeepRequest([]), false);
+  assert.equal(isDeepRequest([{ id: 'deep_report' }, { id: 'review' }]), false, '只认单条');
+});
+
+test('isReviewRequest：识别多模态纠正，不与 deep 混淆', () => {
+  assert.equal(isReviewRequest([{ id: 'review' }]), true);
+  assert.equal(isReviewRequest([{ id: 'deep_report' }]), false);
+  assert.equal(isReviewRequest([{ id: 'describe_look1' }]), false);
+  assert.equal(isReviewRequest(APP_QUESTIONS), false);
+});
+
+test('三条多模态通道互斥：同一请求绝不会同时被判成两种', () => {
+  const cases = [
+    [{ id: 'deep_report' }],
+    [{ id: 'review' }],
+    [{ id: 'describe_look1' }],
+    APP_QUESTIONS,
+    [],
+  ];
+  for (const items of cases) {
+    const hits = [isDeepRequest(items), isReviewRequest(items), isDescribeRequest(items)].filter(Boolean).length;
+    assert.ok(hits <= 1, `请求 ${JSON.stringify(items).slice(0, 60)} 被判成 ${hits} 种通道`);
+  }
+});
+
+test('buildVisionMessages：把 App 的完整指令逐字透传（适配器不重写措辞）', () => {
+  const instruction = '你是严格的穿搭评审。\n用户上下文：正式面试\n只输出一个 JSON 对象。';
+  const messages = buildVisionMessages('ignored-state', instruction);
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].role, 'user');
+  assert.equal(messages[0].content, instruction, '指令必须逐字透传，保证单一真源');
+  assert.equal(buildVisionMessages('from-state', '')[0].content, 'from-state', '无 question 时退回 state');
+  assert.ok(buildVisionMessages('', '')[0].content.length > 0, '两者都空时必须有兜底文案');
 });
 
 test('toAppAnswer：score 索引 → 0..5 分，1 位小数，附 confidence', () => {

@@ -203,20 +203,32 @@ export function isReviewRequest(items) {
 }
 
 /**
- * 纠正请求 → 视觉端点消息。
+ * 判断这次请求是不是 **System Two 深度分析**（App 的 `deep_report` 约定）。
  *
- * question 里带着 App 侧（`src/core/prompts.js` 的 REVIEW_SYSTEM_PROMPT + 用户上下文 +
- * 六维口径 + 输出格式）拼好的**完整指令**，适配器不重复维护这份措辞（单一真源），
- * 只负责把这段指令与图片一起送到视觉端点。
+ * 和 review 同样的原因：不识别就会被当成打分请求转发给 Laya，返回分数而不是报告，
+ * App 解析失败并报「模型返回的内容看不懂」——**这正是用户实测遇到的那条报错**。
  */
-export function buildReviewMessages(stateText, questionText) {
+export function isDeepRequest(items) {
+  return Array.isArray(items)
+    && items.length === 1
+    && items[0]
+    && String(items[0].id) === 'deep_report';
+}
+
+/**
+ * 多模态请求（describe / review / deep）→ 视觉端点的消息体。
+ *
+ * question 里带着 App 侧拼好的**完整指令**（系统提示 + 用户上下文 + 输出格式约束），
+ * 适配器不重复维护这些措辞（单一真源），只负责把指令与图片一起送到视觉端点。
+ */
+export function buildVisionMessages(stateText, questionText) {
   const instruction = (typeof questionText === 'string' && questionText.trim())
     ? questionText.trim()
     : (typeof stateText === 'string' ? stateText.trim() : '');
   return [
     {
       role: 'user',
-      content: instruction || '请依据图片给出 6 个维度的分数，严格只输出规定的 JSON。',
+      content: instruction || '请依据图片给出结构化结果，严格只输出规定的 JSON。',
     },
   ];
 }
@@ -350,10 +362,10 @@ function toInt(n) {
 /* ────────────────────────── 图片转文字（可选） ────────────────────────── */
 
 /**
- * 调 OpenAI 兼容的多模态端点，把图片转成结构化纯文字描述。
+ * describe（图片 → 结构化纯文字描述）的消息体。
  * 严格复用 SPEC §3.2 的描述维度与「只客观描述」的约束，措辞与 App 侧 prompt 一致。
  */
-export function buildVisionMessages(stateText, questionText) {
+export function buildDescribeMessages(stateText, questionText) {
   return [
     {
       role: 'system',
@@ -437,7 +449,7 @@ async function handleDescribe(body) {
     if (!image || !image.dataUri) {
       return { status: 400, payload: { error: { message: 'no image provided' } } };
     }
-    const messages = buildVisionMessages(body.state, body.questions[0] && body.questions[0].question);
+    const messages = buildDescribeMessages(body.state, body.questions[0] && body.questions[0].question);
     messages[1].content = [
       { type: 'text', text: (body.questions[0] && body.questions[0].question) || '请客观描述这张穿搭照片。' },
       { type: 'image_url', image_url: { url: image.dataUri } },
@@ -561,24 +573,24 @@ export function toAppBatchResponse(layaBody, lookIds) {
 }
 
 /**
- * 多模态纠正（`review` 请求）→ 调视觉端点，把模型给的 JSON 原样回给 App。
+ * 多模态直通（describe / review / deep 共用）：把指令 + 图片送到视觉端点，
+ * 把模型返回的文本原样回给 App（answers[0].content）。
  *
  * 关键点：
- *  - 指令由 App 侧拼好（含六维口径与"只输出 JSON"的约束），适配器只转发，不重复维护措辞；
- *  - **图必须带上**：纠正是"以自己看到的画面重判"，没有图这一层就毫无意义；
- *  - 未配置视觉端点时明确失败（502），绝不用 Laya 的打分冒充纠正结果——
- *    那会让 App 以为纠正生效了（实测踩过：纠正请求被当成 6 维打分转发给 Laya）。
+ *  - 指令由 App 侧拼好（含系统提示、上下文与"只输出 JSON"的约束），适配器只转发，
+ *    不重复维护措辞（单一真源）；
+ *  - **图必须带上**：这三条链路都是"以自己看到的画面作答"，没有图就毫无意义；
+ *  - 未配置视觉端点时**明确失败**（502），绝不用 Laya 的打分冒充多模态结果——
+ *    那会让 App 以为拿到了报告/纠正分（实测踩过：review 与 deep 都被当成打分转发给 Laya）。
  */
-async function handleReview(body) {
-  const question = body.questions[0];
-  const images = Array.isArray(body.images) ? body.images : [];
+async function forwardToVision({ answerId, state, questionText, images, temperature }) {
   if (!VISION_BASE_URL) {
     return { status: 502, payload: { error: { message: 'vision not configured' } } };
   }
-  if (!images.length) {
-    return { status: 400, payload: { error: { message: 'review requires images' } } };
+  if (!Array.isArray(images) || !images.length) {
+    return { status: 400, payload: { error: { message: `${answerId} requires images` } } };
   }
-  const messages = buildReviewMessages(body.state, question && question.question);
+  const messages = buildVisionMessages(state, questionText);
   messages[0].content = [
     { type: 'text', text: String(messages[0].content) },
     ...images.map((image) => ({ type: 'image_url', image_url: { url: image.dataUri } })),
@@ -594,26 +606,26 @@ async function handleReview(body) {
       body: JSON.stringify({
         model: VISION_MODEL,
         messages,
-        temperature: 0,
+        temperature: Number.isFinite(temperature) ? temperature : 0,
+        // 推理模型会把预算花在 reasoning 上：给小了会返回 HTTP 200 但 content 为空串
+        // （实测 deepseek-flash 的坑）。deep 报告比纠正更长，所以这里给足。
         max_tokens: VISION_MAX_TOKENS,
       }),
     },
-    90000,
+    120000,
   );
   if (result.status < 200 || result.status >= 300 || !result.json) {
     return { status: 502, payload: { error: { message: `vision upstream HTTP ${result.status}` } } };
   }
-  const content = result.json.choices
-    && result.json.choices[0]
-    && result.json.choices[0].message
-    && result.json.choices[0].message.content;
+  const choice = result.json.choices && result.json.choices[0];
+  const content = choice && choice.message && choice.message.content;
   const usage = result.json.usage || {};
   return {
     status: 200,
     payload: {
       model: VISION_MODEL,
       answers: [{
-        id: 'review',
+        id: answerId,
         type: 'text',
         content: typeof content === 'string' ? content : '',
         confidence: 0.8,
@@ -625,6 +637,30 @@ async function handleReview(body) {
       },
     },
   };
+}
+
+/** 多模态纠正（`review`）。 */
+function handleReview(body) {
+  const question = body.questions[0];
+  return forwardToVision({
+    answerId: 'review',
+    state: body.state,
+    questionText: question && question.question,
+    images: Array.isArray(body.images) ? body.images : [],
+    temperature: 0,
+  });
+}
+
+/** System Two 深度分析（`deep_report`）。 */
+function handleDeep(body) {
+  const question = body.questions[0];
+  return forwardToVision({
+    answerId: 'deep_report',
+    state: body.state,
+    questionText: question && question.question,
+    images: Array.isArray(body.images) ? body.images : [],
+    temperature: 0.2,
+  });
 }
 
 const server = http.createServer(async (req, res) => {
@@ -715,28 +751,36 @@ const server = http.createServer(async (req, res) => {
     }
     const started = Date.now();
     try {
-      const result = isReviewRequest(questions)
-        ? await handleReview(body)
-        : isDescribeRequest(questions)
-          ? await handleDescribe(body)
-          : await (async () => {
-            const layaBody = toLayaRequest(body);
-            const r = await fetchJson(`${UPSTREAM}/v1/systemone`, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                ...(UPSTREAM_KEY ? { Authorization: `Bearer ${UPSTREAM_KEY}` } : {}),
-              },
-              body: JSON.stringify(layaBody),
-            }, 120000);
-            if (r.status < 200 || r.status >= 300 || !r.json) {
-              return { status: r.status || 502, payload: { error: { message: `upstream HTTP ${r.status}` } } };
-            }
-            return {
-              status: 200,
-              payload: toAppResponse(r.json, questions.map((q) => String(q.id))),
-            };
-          })();
+      // 顺序有讲究：先判 deep / review / describe 这三条**多模态**通道，
+      // 剩下的才是"打分"（转发给 Laya）。任何一条漏判都会被打分路径吞掉，
+      // 表现为 App 报「模型返回的内容看不懂」（deep 与 review 都实测踩过）。
+      // 用顺序 if 而不是嵌套三元，避免以后再加通道时改错括号。
+      let result;
+      if (isDeepRequest(questions)) {
+        result = await handleDeep(body);
+      } else if (isReviewRequest(questions)) {
+        result = await handleReview(body);
+      } else if (isDescribeRequest(questions)) {
+        result = await handleDescribe(body);
+      } else {
+        const layaBody = toLayaRequest(body);
+        const r = await fetchJson(`${UPSTREAM}/v1/systemone`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(UPSTREAM_KEY ? { Authorization: `Bearer ${UPSTREAM_KEY}` } : {}),
+          },
+          body: JSON.stringify(layaBody),
+        }, 120000);
+        if (r.status < 200 || r.status >= 300 || !r.json) {
+          result = { status: r.status || 502, payload: { error: { message: `upstream HTTP ${r.status}` } } };
+        } else {
+          result = {
+            status: 200,
+            payload: toAppResponse(r.json, questions.map((q) => String(q.id))),
+          };
+        }
+      }
       // 只打 ASCII 摘要：本机控制台是 GBK，直接打中文会乱码
       process.stdout.write(
         `[adapter] ${url.pathname} -> ${result.status} questions=${questions.length} ms=${Date.now() - started}\n`,

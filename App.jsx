@@ -5,7 +5,13 @@ import { StatusBar } from 'expo-status-bar';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ImagePicker from 'expo-image-picker';
 
-import { flowReducer, initialFlowState, selectDeepFor, selectRankedLooks } from './src/core/flow.js';
+import {
+  flowReducer,
+  initialFlowState,
+  normalizeSystemMode,
+  selectDeepFor,
+  selectRankedLooks,
+} from './src/core/flow.js';
 import { MAX_LOOKS, SCORE_QUESTION_IDS } from './src/core/protocol.js';
 import { buildScoreQuestions } from './src/core/prompts.js';
 import { rankLooks } from './src/core/scoring.js';
@@ -113,16 +119,30 @@ export default function App() {
   const [visionConn, setVisionConn] = useState(null);
   const [testingVision, setTestingVision] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  /**
+   * SPEC §3.13 v1.7 · 本次要跑哪个系统：'quick' | 'deep' | 'both'。
+   * 默认 'quick'（需求原文要求默认优先走 System One，且它最便宜）。
+   * 存成 ref 是为了让回调不依赖闭包里的旧值（与 flowRef 同一套做法）。
+   */
+  const [systemMode, setSystemMode] = useState('quick');
+  const systemModeRef = useRef('quick');
   /** 上一次跑分用的条件快照：条件改了旧分数仍显示，但提示可以重跑 */
   const [ranSignature, setRanSignature] = useState(null);
 
   const flowRef = useRef(flow);
   flowRef.current = flow;
+  systemModeRef.current = systemMode;
   const configRef = useRef(config);
   configRef.current = config;
   /** 图片的唯一内存副本（SPEC §4.1.1）：绝不写盘、绝不进 AsyncStorage */
   const imagesRef = useRef({});
   const abortRef = useRef(null);
+  /**
+   * startDeep 的转发 ref（SPEC §3.13）：startQuick 定义在 startDeep 之前，
+   * 但"两个都要"需要在 System One 跑完后调用 System Two。
+   * 直接互相引用会踩闭包/声明顺序问题，所以用 ref 在每轮渲染后转发。
+   */
+  const startDeepRef = useRef(null);
   const lastRecordIdRef = useRef(null);
 
   const api = useMemo(() => makeApi({ config }), [config]);
@@ -241,7 +261,8 @@ export default function App() {
   );
 
   /* ── System One ───────────────────────────────────────── */
-  const startQuick = useCallback(async () => {
+  /** @param opts.thenDeep 跑完 System One 后接着跑 System Two（"两个都要"）。 */
+  const startQuick = useCallback(async (opts = {}) => {
     const current = flowRef.current;
     const check = validateInput({
       artifacts: current.artifacts,
@@ -313,6 +334,12 @@ export default function App() {
           })),
         }),
       );
+
+      // "两个都要"：System One 成功后再接着跑 System Two。
+      // 用 ref 调 startDeep，因为它定义在本回调之后（直接引用会踩 TDZ / 闭包顺序问题）。
+      if (opts.thenDeep === true && typeof startDeepRef.current === 'function') {
+        await startDeepRef.current(null);
+      }
     } catch (err) {
       const info = classifyError(err);
       if (info.kind === 'cancelled') {
@@ -385,6 +412,8 @@ export default function App() {
     },
     [orchestrator, saveDeepSummary],
   );
+  // 每轮渲染后把最新的 startDeep 转发给 ref，供 startQuick 的"两个都要"调用
+  startDeepRef.current = startDeep;
 
   /* ── 单套重试（SPEC §5.4） ─────────────────────────────── */
   const retryLook = useCallback(
@@ -457,6 +486,31 @@ export default function App() {
     else startQuick();
   }, [expandedLookId, startDeep, startQuick]);
 
+  /**
+   * SPEC §3.13 v1.7 · 让用户自己选跑哪个系统。
+   *
+   * 之前 CTA 写死只跑 System One，用户必须先拿快速分再点卡片才能做深度分析——
+   * 但两者是**并列的两个引擎**，深度分析自带完整报告与排序，完全可以独立使用。
+   * 所以这里按用户选择分派：quick / deep / both。
+   *
+   * 默认仍是 quick：需求原文要求"默认优先执行 System One 快速决策流程"，
+   * 而且它最便宜（本地模型、约 1-2 秒路径）。想直接深度分析的用户自己切一档即可。
+   */
+  const runSelectedSystem = useCallback(
+    async (mode) => {
+      // 调用方可显式传档位；不带参时读当前选择（ref 保证不看闭包里的旧值）
+      const choice = normalizeSystemMode(typeof mode === 'string' ? mode : systemModeRef.current);
+      if (choice === 'deep') {
+        setTab('result');
+        // null = 对所有已选图片跑一次，报告分发到每套（不是"展开某一张卡片"）
+        await startDeep(null);
+        return;
+      }
+      await startQuick(choice === 'both' ? { thenDeep: true } : undefined);
+    },
+    [startDeep, startQuick],
+  );
+
   /* ── 选图 / 删除 ──────────────────────────────────────── */
   const pickImages = useCallback(async () => {
     setPickBusy(true);
@@ -471,22 +525,29 @@ export default function App() {
       });
       if (result.canceled || !result.assets?.length) return;
 
-      const artifacts = [];
-      const assets = result.assets.slice(0, MAX_LOOKS);
+      // 关键：**追加**而不是替换。之前直接 dispatch SET_ARTIFACTS（替换全部），
+      // 用户分两次各选 1 张时，第二次会把前一张冲掉 —— 看起来就像"只能上传一张"。
+      const existing = flowRef.current?.artifacts || [];
+      const slotIds = LOOK_IDS.slice(existing.length, existing.length + MAX_LOOKS);
+      if (!slotIds.length) return; // 已满，交给界面提示"已选满"
+
+      const added = [];
+      const assets = result.assets.slice(0, slotIds.length);
       for (let index = 0; index < assets.length; index += 1) {
-        const artifact = await toArtifact(assets[index], LOOK_IDS[index]);
-        if (artifact) artifacts.push(artifact);
+        const artifact = await toArtifact(assets[index], slotIds[index]);
+        if (artifact) added.push(artifact);
       }
-      if (!artifacts.length) {
+      if (!added.length) {
         // 选图/读取失败：动作是「换图」，与 invalid_input 一致。
         // 文案必须来自 copy.js（AGENTS.md 代码约定），不得手写。
         dispatch({ type: 'SET_ERROR', error: invalidInputError() });
         return;
       }
 
-      imagesRef.current = Object.fromEntries(artifacts.map((item) => [item.lookId, item]));
+      const next = [...existing, ...added].slice(0, MAX_LOOKS);
+      imagesRef.current = Object.fromEntries(next.map((item) => [item.lookId, item]));
       setExpandedLookId(null);
-      dispatch({ type: 'SET_ARTIFACTS', artifacts });
+      dispatch({ type: 'SET_ARTIFACTS', artifacts: next });
     } catch {
       dispatch({ type: 'SET_ERROR', error: invalidInputError() });
     } finally {
@@ -509,7 +570,6 @@ export default function App() {
 
   /* ── 设置 ─────────────────────────────────────────────── */
   const changeConfig = useCallback((patch) => setConfig((prev) => ({ ...prev, ...patch })), []);
-
   const saveKey = useCallback(async (key) => {
     const saved = await saveApiKey(key);
     setKeySecure(saved.secure);
@@ -663,7 +723,10 @@ export default function App() {
         dispatch={dispatch}
         onPickImages={pickImages}
         onRemoveLook={removeLook}
-        onSubmit={startQuick}
+        // SPEC §3.13：由用户选择跑哪个系统，不再写死只跑 System One
+        onSubmit={runSelectedSystem}
+        systemMode={systemMode}
+        onSelectSystem={setSystemMode}
         pickBusy={pickBusy}
         hints={check.hints}
         canRun={check.canRunQuick && !running}

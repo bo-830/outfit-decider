@@ -10,8 +10,37 @@ import PrimaryButton from '../components/PrimaryButton.jsx';
 import QuestionPicker from '../components/QuestionPicker.jsx';
 import SectionLabel from '../components/SectionLabel.jsx';
 import StateChips from '../components/StateChips.jsx';
+import SystemModeSelector from '../components/SystemModeSelector.jsx';
 
-/** Tab 1 · 上传：选图 → 三组 chips → 补一句 → 问题 → 底部主 CTA（SPEC §2）。 */
+/**
+ * CTA 文案随「本次跑哪个」变化——点了会发生什么必须写在按钮上。
+ * `quick` 的 label/sub 是发布版原文，**逐字不动**（验收脚本与文案回归都依赖它）。
+ */
+const SYSTEM_CTA = {
+  quick: {
+    label: '开始快速评分',
+    runningLabel: '正在评分…',
+    sub: '只出分数，不出解释 · 约 10 秒（网络不好会自动重试一次）',
+  },
+  deep: {
+    label: '开始深度分析',
+    runningLabel: '正在做深度分析…',
+    sub: '多模态逐套看图写报告 · 通常 20 秒以上',
+  },
+  both: {
+    label: '先评分，再深度分析',
+    runningLabel: '正在评分…',
+    sub: '先出 6 维分数，再自动跑深度报告 · 比单跑更久',
+  },
+};
+
+/**
+ * 选 `deep` 但一张图都没有时的专用提示：深度分析是"看图写报告"，没有照片根本无从开始。
+ * 这里**替换**掉通用的「先选 1-4 张穿搭照片吧」，而不是并列两条（无图时那条本来也只说选图）。
+ */
+const DEEP_NEEDS_PHOTO = '深度分析需要先选照片，报告要对着画面写';
+
+/** Tab 1 · 上传：选图 → 本次跑哪个 → 三组 chips → 补一句 → 问题 → 底部主 CTA（SPEC §2）。 */
 export default function CaptureScreen({
   flow,
   dispatch,
@@ -22,10 +51,15 @@ export default function CaptureScreen({
   hints = [],
   canRun = false,
   running = false,
+  systemMode = 'quick',
+  onSelectSystem,
 }) {
   const insets = useSafeAreaInsets();
   const artifacts = flow.artifacts || [];
   const count = artifacts.length;
+  const mode = SYSTEM_CTA[systemMode] ? systemMode : 'quick';
+  const cta = SYSTEM_CTA[mode];
+  const deepNeedsPhoto = mode === 'deep' && count === 0;
 
   return (
     <KeyboardAvoidingView
@@ -47,6 +81,16 @@ export default function CaptureScreen({
         </View>
 
         <LookGrid artifacts={artifacts} onPick={onPickImages} onRemove={onRemoveLook} busy={pickBusy} />
+
+        {/* 两个引擎是并列的：跑哪个由用户在这里定，而不是被 CTA 写死成"先快速评分" */}
+        <View style={styles.block}>
+          <View style={styles.padX}>
+            <SectionLabel title="本次跑哪个" meta="三选一" />
+          </View>
+          <View style={styles.padX}>
+            <SystemModeSelector value={mode} onChange={onSelectSystem} />
+          </View>
+        </View>
 
         <StateChips
           userState={flow.userState}
@@ -84,7 +128,14 @@ export default function CaptureScreen({
           />
         </View>
 
-        {hints.length ? (
+        {deepNeedsPhoto ? (
+          <View testID="deep-needs-photo" style={styles.hints}>
+            <View style={styles.hintRow}>
+              <View style={styles.hintDot} />
+              <Text style={styles.hintText}>{DEEP_NEEDS_PHOTO}</Text>
+            </View>
+          </View>
+        ) : hints.length ? (
           <View testID="input-hints" style={styles.hints}>
             {hints.map((hint) => (
               <View key={hint} style={styles.hintRow}>
@@ -106,9 +157,9 @@ export default function CaptureScreen({
       <View style={[styles.dock, { paddingBottom: Math.max(insets.bottom, space.lg) + space.xs }]}>
         <PrimaryButton
           testID="submit-quick"
-          label={running ? '正在评分…' : '开始快速评分'}
-          sub="只出分数，不出解释 · 约 10 秒（网络不好会自动重试一次）"
-          onPress={onSubmit}
+          label={running ? cta.runningLabel : cta.label}
+          sub={cta.sub}
+          onPress={() => onSubmit?.(mode)}
           disabled={!canRun}
           loading={running}
         />
