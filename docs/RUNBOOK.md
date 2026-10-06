@@ -54,7 +54,7 @@ cmd /c "npx expo start --lan"
 
 1. 终端会出现二维码，同时打印形如 `exp://10.63.1.253:8081` 的局域网地址。
    **这个 IP 是 DHCP 分配的，会变**（已实测变过三次：`192.168.1.4` → `192.168.73.231` → `10.63.1.253`），
-   所以别记死，每次看终端或跑 `start-outfit-decider.bat` 打印的值。
+   所以别记死，每次看终端或跑 `tools\start-outfit-decider.bat` 打印的值。
 2. 手机用 **Expo Go 扫码**（Android 用 Expo Go 内扫码；iOS 用系统相机扫码后跳转）。
 3. 首次会请求**相册权限**——允许后即可选 1–4 张穿搭照。
 4. 验收动作：
@@ -97,9 +97,9 @@ cmd /c "npx expo start --lan"
    foreach ($p in 8081,8787,8000) { adb reverse tcp:$p tcp:$p }   # 8081 必带，否则拉不到 bundle
    adb shell am start -a android.intent.action.VIEW -d "exp://127.0.0.1:8081" host.exp.exponent
    ```
-   `start-outfit-decider.bat emulator` 会把上面这套连同 AVD 启动、Expo Go 版本校验一起做完。
+   `tools\start-outfit-decider.bat emulator` 会把上面这套连同 AVD 启动、Expo Go 版本校验一起做完。
 
-### 1.1 模拟器（`start-outfit-decider.bat emulator`）
+### 1.1 模拟器（`tools\start-outfit-decider.bat emulator`）
 
 一条命令做完全部：启动 AVD → 等 `sys.boot_completed` → **校验 Expo Go 版本** →
 `adb reverse` → 拉起 App。

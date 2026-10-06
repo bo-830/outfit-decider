@@ -43,3 +43,7 @@ yarn-error.*
 
 # TS
 *.tsbuildinfo
+
+# Expo Go installer for the Android emulator (199MB binary; not committed).
+# Download the build matching this project SDK from https://expo.dev/go
+Expo-Go-*.apk
