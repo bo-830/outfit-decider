@@ -258,6 +258,20 @@ async function readProbe(page) {
   });
 }
 
+/** 读取 probe 里的某个表达式（与 waitProbe 同一套求值方式）。 */
+async function probeValue(page, expr) {
+  return page.evaluate((src) => {
+    const p = window.__OD_PROBE__;
+    if (!p) return null;
+    try {
+      // eslint-disable-next-line no-new-func
+      return new Function('p', `return (${src});`)(p);
+    } catch {
+      return null;
+    }
+  }, expr);
+}
+
 async function waitProbe(page, expr, timeout = 30000) {
   await page.waitForFunction(
     (src) => {
@@ -747,10 +761,23 @@ async function main() {
     const missingImages = imageFiles.filter((f) => !fs.existsSync(f));
     if (missingImages.length) throw new Error(`missing fixtures: ${missingImages.join(', ')}`);
     await step('pick images', async () => {
-      const how = await pickImages(page, imageFiles);
-      report.evidence.imagePicker = how;
-      // probe.looks 可能是数组（对象列表），也可能只是数量 —— 两种都接受
+      // §7.11 · 分次选图必须**累加**，不能互相冲掉。
+      // 先单独选 1 张，再选其余 3 张 —— 这正是用户实测"只能上传一张"的路径。
+      // 之前 pickImages 直接替换全部 artifacts，第二次选图会把第一次的冲掉；
+      // 而一次性 uploadFile(4 张) 是测不出这个 bug 的（它本来就走一次替换）。
+      const first = imageFiles.slice(0, 1);
+      const rest = imageFiles.slice(1);
+      await pickImages(page, first);
+      await waitProbe(page, '(Array.isArray(p.looks) ? p.looks.length : p.looks) >= 1', 30000);
+      const afterFirst = await probeValue(page, '(Array.isArray(p.looks) ? p.looks.length : p.looks)');
+      await pickImages(page, rest);
       await waitProbe(page, '(Array.isArray(p.looks) ? p.looks.length : p.looks) >= 4', 30000);
+      const afterSecond = await probeValue(page, '(Array.isArray(p.looks) ? p.looks.length : p.looks)');
+      state.pickAccumulated = {
+        afterFirst: Number(afterFirst),
+        afterSecond: Number(afterSecond),
+      };
+      report.evidence.imagePicker = 'input[type=file] x2 (sequential)';
     });
 
     /* 7. 状态 chips + 内置问题 */
@@ -1503,6 +1530,20 @@ async function main() {
     report.stepErrors.push(`report write failed: ${err.message}`);
   }
   add(12, 'report-written', '§7.12', selfCheck, `${path.relative(ROOT, REPORT_PATH)} selfCheck=${selfCheck} consoleErrors=${report.consoleErrors}`);
+
+  // #13 · 分次选图必须累加（用户实测"只能上传一张"的那条路径）。
+  // 一次性 uploadFile(4 张) 测不出这个 bug，所以上面刻意拆成 1 张 + 3 张两次。
+  {
+    const acc = state.pickAccumulated || { afterFirst: null, afterSecond: null };
+    const ok = acc.afterFirst === 1 && Number(acc.afterSecond) >= 4;
+    add(
+      13,
+      'pick-accumulates',
+      '§7.11',
+      ok,
+      `分次选图：第 1 次后=${acc.afterFirst} 张，第 2 次后=${acc.afterSecond} 张（必须累加，不得被后一次冲掉）`,
+    );
+  }
   report.assertions = A;
   report.assertErrors = A.filter((a) => !a.ok).map((a) => `#${a.n} ${a.id}: ${a.detail}`);
   report.extraErrors = report.extras.filter((e) => !e.ok).map((e) => `${e.id}: ${e.detail}`);

@@ -702,6 +702,9 @@ node tools/verify.mjs                 # 全链路验收
 10. 历史：跑完一次后 history 有 1 条，`looks[].description` 非空、无图片字段。
 11. 截图产物存在：`artifacts/screens/{capture,result,compare,history,settings}.png`。
 12. 报告写 `artifacts/verify-report.json`（UTF-8），字段含 `assertErrors: []`、`consoleErrors: 0`。
+13. **分次选图必须累加**（v1.7）：先选 1 张、再选其余 3 张，`p.looks` 必须是 1 → 4，
+    不得被后一次冲掉。**必须拆成两次调用**：一次性上传 4 张是测不出这个 bug 的
+    （那本来就走一次替换），而用户实测"只能上传一张"正是这条路径。
 
 ---
 

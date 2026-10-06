@@ -116,7 +116,7 @@ export default function ResultScreen({
         <EmptyState
           testID="result-empty"
           title="还没有分数"
-          hint="去「上传」里选好照片和场合，点底部的「开始快速评分」。"
+          hint="去「上传」里选好照片和场合，再选「快速评分」或「深度分析」跑一轮。"
           actionLabel="去上传照片"
           onAction={onGoCapture}
         />
