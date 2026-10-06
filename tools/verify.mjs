@@ -1057,6 +1057,8 @@ async function main() {
       report.evidence.baseUrlInjected = !!state.baseUrlInjected;
       report.evidence.modelInputAvailable = !!state.modelInputAvailable;
       report.evidence.imagePicker = report.evidence.imagePicker || null;
+      // #13 的原始测量值必须进报告：断言详情是结论，这里是可以自己复核的过程数据。
+      report.evidence.pickAccumulated = state.pickAccumulated || null;
       report.screenshots = Object.fromEntries(state.screenshots.map((f) => [path.basename(f, '.png'), path.relative(ROOT, f)]));
     } catch (e2) {
       report.stepErrors.push(`evidence collection failed: ${e2.message}`);
