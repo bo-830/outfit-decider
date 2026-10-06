@@ -91,6 +91,30 @@ cmd /c "npx expo start --lan"
 3. 注意：**`http://127.0.0.1:8787` 在手机上指的是手机自己**，真机必须填电脑的局域网 IP。
 4. **Android 模拟器**：它连局域网 IP 通常不通，要用宿主机别名 `http://10.0.2.2:8787`。
    `app.json` 已设 `usesCleartextTraffic: true`，所以明文 HTTP 不会被 Android 9+ 拦掉。
+   **更省事的做法是 `adb reverse`**（推荐）：它把模拟器的 localhost 映射到本机，
+   于是 App 里**默认的** `127.0.0.1:8787` 直接可用，什么都不用改：
+   ```powershell
+   foreach ($p in 8081,8787,8000) { adb reverse tcp:$p tcp:$p }   # 8081 必带，否则拉不到 bundle
+   adb shell am start -a android.intent.action.VIEW -d "exp://127.0.0.1:8081" host.exp.exponent
+   ```
+   `start-outfit-decider.bat emulator` 会把上面这套连同 AVD 启动、Expo Go 版本校验一起做完。
+
+### 1.1 模拟器（`start-outfit-decider.bat emulator`）
+
+一条命令做完全部：启动 AVD → 等 `sys.boot_completed` → **校验 Expo Go 版本** →
+`adb reverse` → 拉起 App。
+
+两个**实测踩过的坑**：
+
+1. **Expo Go 版本必须与项目 SDK 一致。** 模拟器里装的是 SDK 58 而项目是 SDK 57 时，
+   报 `Project is incompatible with this version of Expo Go`——**看起来像网络问题，其实不是**。
+   脚本会用工作区里的 `Expo-Go-57.0.9.apk` 自动重装。
+   （APK 路径与目标版本写在脚本顶部的 `EXPO_GO_APK` / `EXPO_GO_SDK`。）
+2. **模拟器里的 `127.0.0.1` 是模拟器自己**，LAN IP 通常也不通 →
+   靠 `adb reverse` 解决，这样 baseUrl 用默认值即可。
+
+调试时注意：`adb shell input tap` 对**系统相册选择器**（另一个 App 的窗口）经常不生效，
+截图会一模一样；这不是 App 的问题，别据此判断点击失败。
 
 ---
 
