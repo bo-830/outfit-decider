@@ -121,11 +121,14 @@ export default function App() {
   const [showHelp, setShowHelp] = useState(false);
   /**
    * SPEC §3.13 v1.7 · 本次要跑哪个系统：'quick' | 'deep' | 'both'。
-   * 默认 'quick'（需求原文要求默认优先走 System One，且它最便宜）。
+   *
+   * 默认 'deep'（用户 2026-10-06 决定）：他要的是"看结论"，深度分析自带排序与理由，
+   * 打开就能用；快速评分仍是一档之遥。这**取代**了最早"默认优先 System One"的口径——
+   * 改的是默认值，不是契约：两档依然都可独立跑，quick 的语义与文案未动。
    * 存成 ref 是为了让回调不依赖闭包里的旧值（与 flowRef 同一套做法）。
    */
-  const [systemMode, setSystemMode] = useState('quick');
-  const systemModeRef = useRef('quick');
+  const [systemMode, setSystemMode] = useState('deep');
+  const systemModeRef = useRef('deep');
   /** 上一次跑分用的条件快照：条件改了旧分数仍显示，但提示可以重跑 */
   const [ranSignature, setRanSignature] = useState(null);
 

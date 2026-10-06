@@ -545,12 +545,17 @@ export function normalizeSystemMode(value);   // -> 'quick' | 'deep' | 'both'，
 ```
 
 - 选图页 CTA 上方给三档选择：`system-mode-quick` / `system-mode-deep` / `system-mode-both`。
-- **默认 `'quick'`**：原始需求要求默认优先执行 System One 快速决策流程，且它最便宜。
+- **默认 `'deep'`**（v1.7 修订，用户 2026-10-06 决定）：用户要的是"看结论"，深度分析自带排序
+  与理由，打开即可用；快速评分仍是一档之遥。这**取代**了最早"默认优先 System One"的口径。
+- `normalizeSystemMode` 的非法值回退仍是 **`'quick'`**（那是"值坏了"的兜底，不是界面默认值）：
+  两者语义不同——界面默认是产品选择，兜底是"宁可跑最便宜的也别什么都不跑"。
 - 分派规则：
   - `quick` → 只跑 System One（`submit-quick` 的 testID 与主文案保持不变，验收依赖它）；
   - `deep` → 只跑 System Two，**对所有已选图片跑一次**（`startDeep(null)`），报告分发到每套；
     不需要先有快速分；
   - `both` → 先 System One，**成功后**再自动接 System Two。
+- 结果页必须同时支持"只有 quick"和"只有 deep"两种状态：deep-only 时用
+  `selectResultLooks`（§3.6）回落到深度报告自己的星级，并如实标注来源；此时不渲染"双系统对比"。
 - **`deep` 必须有图**：无图时 CTA 禁用，提示要说清"深度分析需要先选照片"（不能用通用话术）。
 - `deep` 档的加载文案必须与 `quick` 区分（深度分析实测约 18–25 秒，比快速慢一个量级）。
 - `normalizeSystemMode` 非法值回退 `'quick'`：宁可跑最便宜的那个，也不要因为一个错值什么都不跑。

@@ -38,6 +38,13 @@ node tools/verify.mjs                # 预期 exit 0、assertions 12/12
 
 ## 1. 真机验收：手机 Expo Go 扫码（推荐路径）
 
+> **为什么不用 `expo run:android`（原生构建）**：Gradle 直接拒绝本项目——
+> `Your project path contains non-ASCII characters`。项目在 `C:\博830\...`，`博` 就是那个字符，
+> 且用 junction 给个 ASCII 路径**也没用**（Node 的 `require.resolve` 会解析回真实路径）。
+> 本项目需要的原生模块（image-picker / secure-store / async-storage / safe-area-context）
+> **Expo Go 全部内置**，所以走 Expo Go 没有任何功能损失。原生构建仅当你日后要加自定义原生模块时才有必要，
+> 那时必须先把项目移到纯 ASCII 路径。
+
 **前提**：手机与本机在同一 Wi-Fi；手机装了 Expo Go（SDK 57）。工作区已备 `Expo-Go-57.0.9.apk`。
 
 ```powershell
@@ -45,23 +52,45 @@ cd C:\博830\vibecoding\outfit-decider
 cmd /c "npx expo start --lan"
 ```
 
-1. 终端会出现二维码，同时打印形如 `exp://192.168.x.x:8081` 的局域网地址（本机当前 IPv4 之一为 `192.168.1.4`）。
+1. 终端会出现二维码，同时打印形如 `exp://10.63.1.253:8081` 的局域网地址。
+   **这个 IP 是 DHCP 分配的，会变**（已实测变过三次：`192.168.1.4` → `192.168.73.231` → `10.63.1.253`），
+   所以别记死，每次看终端或跑 `start-outfit-decider.bat` 打印的值。
 2. 手机用 **Expo Go 扫码**（Android 用 Expo Go 内扫码；iOS 用系统相机扫码后跳转）。
 3. 首次会请求**相册权限**——允许后即可选 1–4 张穿搭照。
 4. 验收动作：
-   - 选 4 张图 → 点选「场合 / 天气 / 风格偏好」→ 点底部「开始快速评分」
-   - 预期：出「4 套排名」，按综合分从高到低，每套 6 维分数；第 1 名带「今天穿这套」吊牌
-   - 点任意一套的「深度分析」→ 出三段式报告；打开「双系统同屏对比」→ 左右两栏并排
+   - 选 1–4 张图 → 点选「场合 / 天气 / 风格偏好」→ 默认档位是**深度分析**，直接点底部按钮即可；
+     想只要分数就切到「快速评分」。
+   - 预期：出「N 套排名」，按综合分从高到低，每套 6 维分数；第 1 名带「今天穿这套」吊牌
+   - 只跑「深度分析」时：出「N 套深度排名」+ 来源说明，星级降序，无「双系统对比」开关
    - 切到「历史」→ 应只有文字描述与分数（**没有图片**）
    - 切到「设置」→ 点「测试连接」→ 应显示真实耗时与连通状态
 
-**真机连不上 mock 时怎么排查**（手机需要能访问你电脑的 8787 端口）：
-1. mock 默认监听 `0.0.0.0:8787`（不是 `127.0.0.1`），所以局域网可达——先用手机浏览器打开 `http://192.168.1.4:8787/health`，能看到 `{"ok":true,...}` 就说明通了。
-2. 打不开 → 本机防火墙拦了 Node 的入站连接。放行方式（管理员 PowerShell）：
+**真机连不上服务时怎么排查**（手机需要能访问你电脑的 8787 与 8081）：
+
+1. 服务都监听 `0.0.0.0`（不是 `127.0.0.1`），所以局域网可达——先用手机浏览器打开
+   `http://<你的局域网IP>:8787/health`，能看到 `{"ok":true,...}` 就说明通了。
+2. **打不开 → 先查本机防火墙是否拦了入站连接。**（**实测本机已有放行规则**，所以通常不是这个原因，
+   但换机器/换 Node 安装位置后要重新确认。）
+   先看是否已有规则：
    ```powershell
-   New-NetFirewallRule -DisplayName "outfit-decider mock 8787" -Direction Inbound -Protocol TCP -LocalPort 8787 -Action Allow
+   Get-NetFirewallApplicationFilter |
+     Where-Object { $_.Program -match 'node|python' } |
+     ForEach-Object { $_.Program } | Select-Object -Unique
    ```
-3. 注意：**`http://127.0.0.1:8787` 在手机上指的是手机自己**，真机必须填电脑的局域网 IP（`192.168.x.x`）。
+   本机现状：`node.exe`（覆盖适配器 8787 与 Metro 8081）与
+   `...\dsh-primary-runtime\...\python.exe`（覆盖 Laya 8000）**都已有 Allow 入站规则**，
+   且正是当前实际运行的进程路径。
+   没有规则时才需要**管理员** PowerShell 放行：
+   ```powershell
+   foreach ($p in 8787,8000,8081) {
+     New-NetFirewallRule -DisplayName "outfit-decider $p" -Direction Inbound -Protocol TCP -LocalPort $p -Action Allow
+   }
+   ```
+   **8081 必须一起放行**：它是 Metro 打包服务，只放 8787 的话 Expo Go 能打开 App 外壳，
+   但**永远拉不到 JS bundle**，表现为卡在启动页——很容易被误判成 App 的问题。
+3. 注意：**`http://127.0.0.1:8787` 在手机上指的是手机自己**，真机必须填电脑的局域网 IP。
+4. **Android 模拟器**：它连局域网 IP 通常不通，要用宿主机别名 `http://10.0.2.2:8787`。
+   `app.json` 已设 `usesCleartextTraffic: true`，所以明文 HTTP 不会被 Android 9+ 拦掉。
 
 ---
 
