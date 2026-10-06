@@ -188,6 +188,48 @@ if "%LANIP%"=="" (
   echo       LAN IP = %LANIP%
 )
 
+REM ---------- step 5b: did the LAN IP change since last run? ----------
+REM  The App PERSISTS baseUrl, so a stale IP silently stops working with no
+REM  warning of its own. This is the one thing worth shouting about.
+REM  Measured drift on this machine: 192.168.1.4 -> 192.168.73.231 -> 10.63.1.253
+REM  -> 192.168.73.231. Same machine, same day.
+REM
+REM  Only the LAN IP is compared, not the baseUrl stored in the App: the script
+REM  cannot read the App's storage, and comparing equal things is more honest
+REM  than guessing. When the IP changes we say so, and say exactly what to do.
+set "IPSTATE=%PROJECT%\.last-lan-ip.txt"
+set "PREVIP="
+if exist "%IPSTATE%" (
+  REM  MUST use !PREVIP! (delayed), not %PREVIP%: this for /f and the if below
+  REM  live in the same parenthesized region, so %PREVIP% would be expanded at
+  REM  parse time - i.e. before the for /f has assigned anything - and always
+  REM  read as empty. That produced "LAN IP CHANGED:  =  -> x" (measured).
+  for /f "usebackq delims=" %%A in ("%IPSTATE%") do set "PREVIP=%%A"
+  set "PREVIP=!PREVIP: =!"
+)
+set "IPCHANGED=0"
+if not "!PREVIP!"=="" if not "!PREVIP!"=="%LANIP%" set "IPCHANGED=1"
+
+REM  Only remember a real LAN address, never the 127.0.0.1 placeholder.
+if not "%LANIP%"=="127.0.0.1" > "%IPSTATE%" echo %LANIP%
+
+if "!IPCHANGED!"=="1" (
+  echo.
+  echo   ************************************************************
+  echo   * LAN IP CHANGED: !PREVIP!  -^>  %LANIP%
+  echo   *
+  echo   * If your phone can no longer reach the adapter, this is why.
+  echo   * The App keeps the OLD address and will NOT warn you.
+  echo   *
+  echo   * Fix: on the App's Settings page, set decision baseUrl to
+  echo   *      http://%LANIP%:%ADAPTER_PORT%
+  echo   *
+  echo   * The Android emulator is NOT affected ^(it uses adb reverse^).
+  echo   ************************************************************
+) else if "!PREVIP!"=="" (
+  echo       ^(first run: recorded %LANIP% for change detection^)
+)
+
 REM ---------- step 6: report + self test ----------
 echo [6/6] self test ...
 powershell -NoProfile -Command ^
@@ -311,8 +353,15 @@ echo       engine mode     : Laya + multimodal review
 echo       decision baseUrl: http://%LANIP%:%ADAPTER_PORT%
 echo       askPath         : /ask
 echo       healthPath      : /health
+echo       model name      : outfit-judge-v1   ^(any value works; the adapter
+echo                         does not forward it, Laya routes itself^)
+echo       API Key         : leave EMPTY       ^(the adapter does not check it^)
 echo       vision model    : leave EMPTY, and tick
 echo                         "configured on the server" checkbox
+echo.
+echo   These PERSIST in the App - you normally type them once, not every run.
+echo   The only field that goes stale is baseUrl, and only when the LAN IP
+echo   above changes ^(which this script now watches for and shouts about^).
 echo.
 echo   NOTE: 127.0.0.1 on the phone means the PHONE itself.
 echo         Always use %LANIP% there.

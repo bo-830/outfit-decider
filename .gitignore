@@ -47,3 +47,6 @@ yarn-error.*
 # Expo Go installer for the Android emulator (199MB binary; not committed).
 # Download the build matching this project SDK from https://expo.dev/go
 Expo-Go-*.apk
+
+# LAN IP remembered by tools/start-outfit-decider.bat for change detection
+.last-lan-ip.txt
