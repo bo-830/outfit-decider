@@ -304,6 +304,33 @@ async function clickTestId(page, id, timeout = 15000) {
   }
 }
 
+/**
+ * SPEC §3.13b · 显式选择本次跑哪个系统。
+ *
+ * 产品默认档是 `deep`，而上传页的 CTA 按当前档位分派 —— 所以任何"想跑 System One"
+ * 的步骤都必须先显式切到 quick，否则点下去跑的是 System Two。
+ * 选择器不存在时静默跳过（兼容未实现该控件的历史构建），返回是否真的选中。
+ */
+async function selectSystemMode(page, mode) {
+  const id = `system-mode-${mode}`;
+  if (!(await exists(page, `[data-testid="${id}"]`))) return false;
+  await clickTestId(page, id);
+  // 等选中态落地，避免紧接着的 CTA 点击读到旧档位
+  await page
+    .waitForFunction(
+      (sel) => {
+        const el = document.querySelector(sel);
+        if (!el) return false;
+        return el.getAttribute('aria-checked') === 'true' || el.getAttribute('aria-selected') === 'true';
+      },
+      { timeout: 5000 },
+      `[data-testid="${id}"]`,
+    )
+    .catch(() => {});
+  await sleep(250);
+  return true;
+}
+
 async function textOf(page, selector) {
   try {
     return await page.$eval(selector, (el) => (el.innerText || el.textContent || '').trim());
@@ -836,6 +863,10 @@ async function main() {
 
     /* 8. 跑 System One */
     await step('run quick', async () => {
+      // SPEC §3.13b：上传页的 CTA 会按当前档位分派，而**产品默认档是 deep**。
+      // 所以这一步必须先显式切到 quick，否则点下去跑的是 System Two，
+      // probe.quick 永远不出现 -> 这里会 90s 超时（实测踩过）。
+      await selectSystemMode(page, 'quick');
       await clickTestId(page, 'submit-quick');
       await waitProbe(page, 'p.quick && Array.isArray(p.quick.ranked) && p.quick.ranked.length > 0', 90000);
       await waitProbe(page, "p.tab === 'result' || p.quick", 15000);
@@ -951,6 +982,8 @@ async function main() {
       const runQuickExpectBanner = async (expectedCopy, timeoutMs) => {
         await clickTestId(page, 'tab-capture');
         await sleep(300);
+        // 同上：默认档是 deep，这里要的是 System One 的异常横幅，必须显式切档
+        await selectSystemMode(page, 'quick');
         await clickTestId(page, 'submit-quick');
         return waitBannerText(page, expectedCopy, timeoutMs);
       };
