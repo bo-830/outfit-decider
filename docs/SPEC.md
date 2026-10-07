@@ -578,6 +578,14 @@ export const motion = { fast:150, base:250, slow:400 };
 1. `ImageArtifact` 只存在于 `flowReducer.artifacts` 与组件 `useRef`；**不写入 AsyncStorage、不写文件、不进历史**。
 2. 运行结束（`QUICK_DONE` / `DEEP_DONE` / `RESET_RUN`）后，`descriptions` 保留，`artifacts` 由 `RESET_RUN` 清空；
    App 失焦（`AppState` 非 active）时清空图片引用。
+   **例外（v1.7 修订，必须）**：**"正在挑选照片"期间不得清空**。
+   打开系统相册会让 App 进入 background（相册是另一个 Activity），那**不是**用户离开了 App；
+   若照清不误，相册返回后追加逻辑会读到 0 张、把新图当成整份列表写入 ——
+   表现就是"加第二套会把第一套顶掉"，且**第一次选图看不出问题**（本来就从 0 开始）。
+   实现为 `pickingRef`：仅在 `launchImageLibraryAsync` 的 try/finally 窗口内豁免，
+   其余任何非 active 一律照常清空，隐私不变量不被削弱。
+   该行为由门禁 #14 覆盖（`__OD_SET_PICKING__` / `__OD_SIMULATE_BLUR__` 测试缝：
+   窗口内失焦 → 保留；窗口外失焦 → 清空）。
 3. `appendHistory` 前的记录必须过 `assertNoImagePayload(record)`（在 `history.js` 内实现并导出），
    命中则丢弃图片字段并记一条 warning。
 4. 冒烟脚本在运行后 dump 全部 storage 键值，断言不含 `data:image` 与 `base64`。
@@ -710,6 +718,11 @@ node tools/verify.mjs                 # 全链路验收
 13. **分次选图必须累加**（v1.7）：先选 1 张、再选其余 3 张，`p.looks` 必须是 1 → 4，
     不得被后一次冲掉。**必须拆成两次调用**：一次性上传 4 张是测不出这个 bug 的
     （那本来就走一次替换），而用户实测"只能上传一张"正是这条路径。
+14. **挑图窗口内失焦不得清空已选图片**（v1.7）：窗口内失焦 → 张数不变；
+    窗口外失焦 → 张数归零（隐私不变量不许被削弱）。
+    web 验收不经过相册、天然测不到，所以用 `__OD_SET_PICKING__` / `__OD_SIMULATE_BLUR__`
+    测试缝显式覆盖。**这是"加第二套顶掉第一套"的真正成因**——
+    没有它，前两条断言即使在 web 全绿，原生上依然是坏的。
 
 ---
 

@@ -119,8 +119,6 @@ export default function App() {
   const [visionConn, setVisionConn] = useState(null);
   const [testingVision, setTestingVision] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
-  // DIAGNOSTIC (temporary): 上传页可见的选择流程 trace，只存计数与原因，定位后删除
-  const [diagTrace, setDiagTrace] = useState('');
   /**
    * SPEC §3.13 v1.7 · 本次要跑哪个系统：'quick' | 'deep' | 'both'。
    *
@@ -142,6 +140,12 @@ export default function App() {
   /** 图片的唯一内存副本（SPEC §4.1.1）：绝不写盘、绝不进 AsyncStorage */
   const imagesRef = useRef({});
   const abortRef = useRef(null);
+  /**
+   * 正在挑选照片（SPEC §4.1.2 的例外窗口）。
+   * 相册是另一个 Activity，打开它必然让 App 失焦；那**不是**用户离开了 App，
+   * 不该触发"清空图片"。没有这个标记，第二次选图会读到 0 张并顶掉第一张。
+   */
+  const pickingRef = useRef(false);
   /**
    * startDeep 的转发 ref（SPEC §3.13）：startQuick 定义在 startDeep 之前，
    * 但"两个都要"需要在 System One 跑完后调用 System Two。
@@ -217,10 +221,20 @@ export default function App() {
     AsyncStorage.setItem(CONFIG_KEY, JSON.stringify(payload)).catch(() => {});
   }, [config, ready]);
 
-  /* App 失焦 → 清空图片引用（SPEC §4.1.2） */
+  /* App 失焦 → 清空图片引用（SPEC §4.1.2）
+   *
+   * 例外（必须有，否则功能根本不可用）：**打开系统相册会让 App 进入 background**。
+   * 相册返回时本监听器已经把 artifacts 清空，于是"追加"读到 0 张、
+   * 新图被当成整份列表写进去 —— 表现就是"加第二套会把第一套顶掉"。
+   * 而且第一次选图看不出来（本来就从 0 开始），只有第二次才暴露。实测定位。
+   *
+   * 所以只在"正在挑照片"这个瞬时窗口内忽略失焦；其余任何非 active 一律照常清空，
+   * 隐私不变量（离开 App 即释放图片）不被削弱。
+   */
   useEffect(() => {
     const sub = AppState.addEventListener('change', (next) => {
       if (next === 'active') return;
+      if (pickingRef.current) return; // 相册造成的瞬时失焦，不算用户离开
       imagesRef.current = {};
       abortRef.current?.abort?.();
       dispatch({ type: 'RESET_RUN' });
@@ -559,10 +573,9 @@ export default function App() {
   /* ── 选图 / 删除 ──────────────────────────────────────── */
   const pickImages = useCallback(async () => {
     setPickBusy(true);
-    // DIAGNOSTIC (temporary): 用户实测"加第二套会顶掉第一套"，而 state 恒为 1。
-    // 只看 state 无法判断是哪一步 return 的，所以把每一步结果写进内存 trace
-    // （**只记计数与原因，绝不记图片/Key**），直接显示在上传页。
-    // 定位后连同 CaptureScreen 的 diag 行一起删除。
+    // 打开相册期间标记"正在挑照片"：相册是另一个 Activity，会让 App 失焦，
+    // 那**不是**用户离开 App，不该触发 §4.1.2 的清空（否则追加会读到 0 张）。
+    pickingRef.current = true;
     try {
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ['images'],
@@ -572,16 +585,12 @@ export default function App() {
         base64: true,
         exif: false,
       });
-      if (result.canceled || !result.assets?.length) {
-        setDiagTrace((t) => `${t} | cancel/empty(assets=${result.assets ? result.assets.length : 'n/a'})`);
-        return;
-      }
+      if (result.canceled || !result.assets?.length) return;
 
       // 关键：**追加**而不是替换。之前直接 dispatch SET_ARTIFACTS（替换全部），
       // 用户分两次各选 1 张时，第二次会把前一张冲掉 —— 看起来就像"只能上传一张"。
       // 追加规则抽成 appendArtifacts 纯函数（src/core/protocol.js），有直接单测。
       const existing = flowRef.current?.artifacts || [];
-      setDiagTrace((t) => `${t} | pick:assets=${result.assets.length} existing=${existing.length}`);
       if (existing.length >= MAX_LOOKS) return; // 已满，界面会显示"已选满"
 
       const seeds = [];
@@ -592,25 +601,20 @@ export default function App() {
       if (!seeds.length) {
         // 选图/读取失败：动作是「换图」，与 invalid_input 一致。
         // 文案必须来自 copy.js（AGENTS.md 代码约定），不得手写。
-        setDiagTrace((t) => `${t} | seeds=0->ERR`);
         dispatch({ type: 'SET_ERROR', error: invalidInputError() });
         return;
       }
       const appended = appendArtifacts(existing, seeds, LOOK_IDS, MAX_LOOKS);
-      if (!appended) {
-        setDiagTrace((t) => `${t} | append=null`);
-        return;
-      }
+      if (!appended) return;
 
       const next = appended.artifacts;
-      setDiagTrace((t) => `${t} | seeds=${seeds.length} next=${next.length}(${next.map((a) => a.lookId).join(',')})`);
       imagesRef.current = Object.fromEntries(next.map((item) => [item.lookId, item]));
       setExpandedLookId(null);
       dispatch({ type: 'SET_ARTIFACTS', artifacts: next });
     } catch {
-      setDiagTrace((t) => `${t} | throw`);
       dispatch({ type: 'SET_ERROR', error: invalidInputError() });
     } finally {
+      pickingRef.current = false;
       setPickBusy(false);
     }
   }, []);
@@ -738,6 +742,36 @@ export default function App() {
     window.__OD_PROBE__ = probe;
   }, [probe]);
 
+  /**
+   * 测试缝（web）：模拟"App 失焦"，用来验证 SPEC §4.1.2 的清空行为。
+   *
+   * 为什么需要它：这个 bug 只发生在**原生**（相册是另一个 Activity，会让 App 失焦），
+   * 而 web 验收环境不经过相册，天然测不出来 —— 这正是"加了单测却仍然没修好"的原因。
+   * 有了这个缝，冒烟脚本就能断言：
+   *   · 挑图窗口内失焦 → 图片**保留**（否则追加读到 0 张，第二套会顶掉第一套）
+   *   · 挑图窗口外失焦 → 图片**清空**（隐私不变量不许被削弱）
+   * 与 __OD_SET_ARTIFACTS__ 同性质：仅 web、仅测试，绝不进存储。
+   */
+  useEffect(() => {
+    if (!IS_WEB || typeof window === 'undefined') return;
+    window.__OD_SIMULATE_BLUR__ = () => {
+      if (pickingRef.current) return 'exempted';
+      imagesRef.current = {};
+      abortRef.current?.abort?.();
+      dispatch({ type: 'RESET_RUN' });
+      return 'cleared';
+    };
+    /** 让测试缝能进入/退出"正在挑照片"窗口，验证豁免只在该窗口生效。 */
+    window.__OD_SET_PICKING__ = (on) => {
+      pickingRef.current = !!on;
+      return pickingRef.current;
+    };
+    return () => {
+      delete window.__OD_SIMULATE_BLUR__;
+      delete window.__OD_SET_PICKING__;
+    };
+  }, []);
+
   /* 测试缝：web 冒烟脚本可以塞入内存构造的 artifacts（仍然不落盘） */
   useEffect(() => {
     if (!IS_WEB || typeof window === 'undefined') return;
@@ -787,7 +821,6 @@ export default function App() {
         onSubmit={runSelectedSystem}
         systemMode={systemMode}
         onSelectSystem={setSystemMode}
-        diagTrace={diagTrace}
         pickBusy={pickBusy}
         hints={check.hints}
         canRun={check.canRunQuick && !running}

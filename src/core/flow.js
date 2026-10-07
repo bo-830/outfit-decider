@@ -61,11 +61,6 @@ export function flowReducer(state, action) {
       // 分次选图的追加逻辑在 App.jsx（它能看到当前 artifacts 与已用 lookId）；
       // 这里只管状态一致性：换图会作废本次结果与描述。
       const artifacts = Array.isArray(action.artifacts) ? action.artifacts.slice() : [];
-      // 临时诊断：区分"调用方没累加"和"累加了却被别处覆盖"。稳定后删除。
-      console.log(
-        `[ODSET] in=${artifacts.length} ids=${artifacts.map((a) => a && a.lookId).join(',')} `
-        + `prev=${Array.isArray(current.artifacts) ? current.artifacts.length : 0} phase=${current.phase}`,
-      );
       const changed = !sameLookIds(current.artifacts, artifacts);
       if (!changed) return { ...current, artifacts };
       return {

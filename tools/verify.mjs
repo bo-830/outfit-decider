@@ -1057,6 +1057,40 @@ async function main() {
       if (!state.mockAliveAtEnd) report.stepErrors.push('mock died during the browser phase (shared port 8787?)');
     });
 
+    /* 最后一步 · §7.11 挑图窗口内"失焦"不得清空已选图片。
+       这是"加第二套顶掉第一套"的真正成因：Android 打开相册会让 App 进入 background，
+       而失焦处理器把 artifacts 清空 → 追加读到 0 张 → 新图被当成整份列表写入。
+       web 不经过相册，天然测不到，所以用 __OD_SET_PICKING__ / __OD_SIMULATE_BLUR__ 测试缝。
+       注意：本步会**故意清空图片**，所以必须放在所有依赖图片的步骤之后。 */
+    await step('blur guard during pick', async () => {
+      const before = await probeValue(page, '(Array.isArray(p.looks) ? p.looks.length : p.looks)');
+
+      // ① 进入"正在挑照片"窗口 → 失焦必须被豁免，已选图片保留
+      const exempted = await page.evaluate(() => {
+        if (typeof window.__OD_SET_PICKING__ !== 'function') return 'missing';
+        window.__OD_SET_PICKING__(true);
+        return window.__OD_SIMULATE_BLUR__();
+      });
+      await sleep(200);
+      const afterExempt = await probeValue(page, '(Array.isArray(p.looks) ? p.looks.length : p.looks)');
+
+      // ② 退出窗口（相册已返回）→ 失焦必须照常清空（隐私不变量不许被削弱）
+      const cleared = await page.evaluate(() => {
+        if (typeof window.__OD_SET_PICKING__ !== 'function') return 'missing';
+        window.__OD_SET_PICKING__(false);
+        return window.__OD_SIMULATE_BLUR__();
+      });
+      await sleep(300);
+      const afterClear = await probeValue(page, '(Array.isArray(p.looks) ? p.looks.length : p.looks)');
+      state.blurGuard = {
+        before: Number(before),
+        exempted,
+        afterExempt: Number(afterExempt),
+        cleared,
+        afterClear: Number(afterClear),
+      };
+    });
+
     report.evidence.exchangeSummary = exchanges.map((e) => ({
       kind: e.kind,
       status: e.status,
@@ -1577,6 +1611,27 @@ async function main() {
       '§7.11',
       ok,
       `分次选图：第 1 次后=${acc.afterFirst} 张，第 2 次后=${acc.afterSecond} 张（必须累加，不得被后一次冲掉）`,
+    );
+  }
+
+  // #14 · 挑图窗口内"失焦"不得清空已选图片（SPEC §4.1.2 + §7.11）。
+  // 这是"加第二套顶掉第一套"的真正成因：Android 打开相册会让 App 进入 background，
+  // 而失焦处理器把 artifacts 清空了 —— 于是追加读到 0 张、新图被当成整份列表写入。
+  // web 不经过相册，天然测不到，所以靠 __OD_SIMULATE_BLUR__ 测试缝显式验证。
+  {
+    const r = state.blurGuard || {};
+    const ok = Number(r.before) > 0
+      && r.exempted === 'exempted'
+      && Number(r.afterExempt) === Number(r.before)
+      && r.cleared === 'cleared'
+      && Number(r.afterClear) === 0;
+    add(
+      14,
+      'blur-during-pick-keeps-images',
+      '§7.11',
+      ok,
+      `失焦前=${r.before} 张；挑图窗口内失焦=${r.exempted} → ${r.afterExempt} 张（应不变）；`
+        + `窗口外失焦=${r.cleared} → ${r.afterClear} 张（应清空）`,
     );
   }
   report.assertions = A;
