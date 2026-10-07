@@ -87,22 +87,22 @@ if not exist "%PROJECT%\tools\laya-adapter.mjs" (
   exit /b 1
 )
 
-REM ---------- step 0: admin check (firewall rules need it) ----------
+REM ---------- step 0: admin check (firewall rules WANT it, not need it) ----------
+REM  Double-clicking should just work. So we ASK for elevation once, but if the
+REM  user declines we carry on WITHOUT it: the firewall rules usually already
+REM  exist from the first run, and everything except adding them works unelevated.
+REM  Blocking here would mean "UAC prompt -> user says no -> nothing starts",
+REM  which is exactly the kind of dead end we are trying to remove.
 net session >nul 2>&1
 if errorlevel 1 (
-  echo [0/6] administrator rights are required for the firewall rule.
-  echo.
-  echo   Two options:
-  echo     A^) right-click this .bat  ^-^>  "Run as administrator"   ^(recommended^)
-  echo     B^) approve the UAC prompt that will now appear
-  echo.
+  echo [0/6] not elevated - asking for administrator rights ^(you may decline^) ...
   powershell -NoProfile -Command ^
-    "Start-Process -FilePath $env:ComSpec -Verb RunAs -ArgumentList '/k',('cd /d ' + [char]34 + '%~dp0' + [char]34 + ' && ' + [char]34 + '%~f0' + [char]34)"
-  echo   If nothing appeared, close this window and use option A.
-  pause
-  exit /b 0
+    "try { Start-Process -FilePath $env:ComSpec -Verb RunAs -ArgumentList '/c','\"\"%~f0\"\"' -ErrorAction Stop } catch {}" >nul 2>&1
+  echo       continuing WITHOUT elevation; firewall rules will be skipped if absent.
+  echo       ^(right-click -^> Run as administrator once, if the phone cannot connect^)
+) else (
+  echo [0/6] running with administrator rights - good.
 )
-echo [0/6] running with administrator rights - good.
 
 REM ---------- step 1: firewall ----------
 echo [1/6] opening firewall for TCP %LAYA_PORT%, %ADAPTER_PORT%, %EXPO_PORT% ...
@@ -110,7 +110,7 @@ for %%P in (%LAYA_PORT% %ADAPTER_PORT% %EXPO_PORT%) do (
   netsh advfirewall firewall show rule name="outfit-decider %%P" >nul 2>&1
   if errorlevel 1 (
     netsh advfirewall firewall add rule name="outfit-decider %%P" dir=in action=allow protocol=TCP localport=%%P >nul
-    if errorlevel 1 (echo       [WARN] could not add rule for %%P) else (echo       added rule for %%P)
+    if errorlevel 1 (echo       [SKIP] need administrator to add rule for %%P) else (echo       added rule for %%P)
   ) else (
     echo       rule for %%P already present
   )
@@ -216,26 +216,26 @@ if "%LANIP%"=="" (
 )
 
 REM ---------- step 5b: did the LAN IP change since last run? ----------
-REM  The App PERSISTS baseUrl, so a stale IP silently stops working with no
-REM  warning of its own. This is the one thing worth shouting about.
-REM  Measured drift on this machine: 192.168.1.4 -> 192.168.73.231 -> 10.63.1.253
-REM  -> 192.168.73.231. Same machine, same day.
+REM  The App PERSISTS baseUrl, so a stale IP silently stops working and the App
+REM  itself cannot tell you why. Measured drift on this machine, same day:
+REM      192.168.1.4 -> 192.168.73.231 -> 10.63.1.253 -> 192.168.73.231
 REM
-REM  Only the LAN IP is compared, not the baseUrl stored in the App: the script
-REM  cannot read the App's storage, and comparing equal things is more honest
-REM  than guessing. When the IP changes we say so, and say exactly what to do.
+REM  Implementation is deliberately dumb, because clever versions failed here:
+REM   * The "last IP" is ALWAYS ONE LINE written by this script, so no parsing
+REM     or regex is needed - just read it. (findstr's regex does NOT support '+',
+REM     so a `[0-9]+` style pattern silently fails to match, which produced both
+REM     a false "changed" and a missed "changed" during testing.)
+REM   * "no previous file" is NOT "the IP changed": gate on HASPREV, otherwise
+REM     every first run cries wolf and the warning becomes noise.
 set "IPSTATE=%PROJECT%\.last-lan-ip.txt"
 set "PREVIP="
-if exist "%IPSTATE%" (
-  REM  MUST use !PREVIP! (delayed), not %PREVIP%: this for /f and the if below
-  REM  live in the same parenthesized region, so %PREVIP% would be expanded at
-  REM  parse time - i.e. before the for /f has assigned anything - and always
-  REM  read as empty. That produced "LAN IP CHANGED:  =  -> x" (measured).
-  for /f "usebackq delims=" %%A in ("%IPSTATE%") do set "PREVIP=%%A"
-  set "PREVIP=!PREVIP: =!"
-)
+if exist "%IPSTATE%" set /p PREVIP=<"%IPSTATE%"
+
+set "HASPREV=0"
+if not "!PREVIP!"=="" set "HASPREV=1"
+
 set "IPCHANGED=0"
-if not "!PREVIP!"=="" if not "!PREVIP!"=="%LANIP%" set "IPCHANGED=1"
+if "!HASPREV!"=="1" if not "!PREVIP!"=="%LANIP%" set "IPCHANGED=1"
 
 REM  Only remember a real LAN address, never the 127.0.0.1 placeholder.
 if not "%LANIP%"=="127.0.0.1" > "%IPSTATE%" echo %LANIP%
@@ -253,7 +253,7 @@ if "!IPCHANGED!"=="1" (
   echo   *
   echo   * The Android emulator is NOT affected ^(it uses adb reverse^).
   echo   ************************************************************
-) else if "!PREVIP!"=="" (
+) else if "!HASPREV!"=="0" (
   echo       ^(first run: recorded %LANIP% for change detection^)
 )
 
@@ -441,7 +441,8 @@ echo double-click use they outlive this window; but a session logout or a
 echo forced process-tree kill WILL take them down (measured). That is why this
 echo script is IDEMPOTENT: if the app starts failing, just run it again - it
 echo only starts what is missing.
-echo To stop everything:  "%~nx0" stop
+echo To stop everything:  double-click  stop-outfit-decider.bat  in this folder
+echo                      ^(or run this file with the "stop" argument^)
 echo.
 pause
 endlocal

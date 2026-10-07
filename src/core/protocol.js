@@ -36,6 +36,42 @@ export function toDataUri(artifact) {
 }
 
 /**
+ * SPEC §3.6 v1.7 · 把新选的图**追加**到已有列表上（分次选图的正确语义）。
+ *
+ * 为什么抽成纯函数：这正是用户实测"加了第二套就把第一套顶掉"的地方，
+ * 必须有直接单测覆盖，而不是只靠"读代码觉得对"。
+ *
+ * 规则：
+ *  - 新图从 `LOOK_IDS[existing.length]` 起继续编号，绝不复用已占用的 lookId；
+ *  - 已有条目**原样保留**（顺序不变），追加在末尾；
+ *  - 超出 maxLooks 的部分丢弃；
+ *  - 已满时返回 null，调用方据此提示"已选满"，而不是静默替换。
+ *
+ * @param {Array} existing 当前已选（元素含 lookId）
+ * @param {Array} incoming 本次新选的种子（不含 lookId，或含无用的 lookId）
+ * @param {Array<string>} lookIds 可用编号池，如 ['look1','look2','look3','look4']
+ * @param {number} maxLooks 上限
+ * @returns {{artifacts: Array}|null} null = 没有可追加的（已满或本次为空）
+ */
+export function appendArtifacts(existing, incoming, lookIds, maxLooks) {
+  const list = Array.isArray(existing) ? existing.filter((item) => item && item.lookId) : [];
+  const ids = Array.isArray(lookIds) ? lookIds : [];
+  const cap = Number.isFinite(maxLooks) ? maxLooks : ids.length;
+
+  if (list.length >= cap) return null; // 已满：交给界面提示，绝不替换已有内容
+
+  const seeds = (Array.isArray(incoming) ? incoming : []).filter(Boolean);
+  const free = ids.slice(list.length, cap);
+  const added = [];
+  for (let i = 0; i < seeds.length && i < free.length; i += 1) {
+    added.push({ ...seeds[i], lookId: free[i] });
+  }
+  if (!added.length) return null;
+
+  return { artifacts: [...list, ...added].slice(0, cap) };
+}
+
+/**
  * SPEC §1.3 请求体 · 严格字段顺序 model → state → questions，浅拷贝，不改入参。
  */
 export function buildRequest({ model, state, questions } = {}) {

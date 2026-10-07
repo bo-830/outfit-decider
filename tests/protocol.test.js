@@ -6,6 +6,7 @@ import {
   MAX_LOOKS,
   SCORE_DECIMALS,
   SCORE_QUESTION_IDS,
+  appendArtifacts,
   buildRequest,
   buildScoreAnswers,
   clampScore,
@@ -132,6 +133,74 @@ test('isScoreAnswerStrict：完全合规才 true（越界/多小数/坏 confiden
   assert.equal(isScoreAnswerStrict({ id: '', type: 'score', score: 4.5 }), false);
   assert.equal(isScoreAnswerStrict({ id: 'a', type: 'score', score: 4.5, confidence: null }), true);
   assert.equal(isScoreAnswerStrict(null), false);
+});
+
+/* ── 分次选图必须累加（用户实测："加第二套会把第一套顶掉"） ────────────── */
+
+const LOOK_IDS = ['look1', 'look2', 'look3', 'look4'];
+const seed = (n) => ({ mime: 'image/jpeg', base64: `B${n}` });
+
+test('appendArtifacts：第一次选 1 张 → 1 张，编号 look1', () => {
+  const out = appendArtifacts([], [seed(1)], LOOK_IDS, 4);
+  assert.equal(out.artifacts.length, 1);
+  assert.equal(out.artifacts[0].lookId, 'look1');
+  assert.equal(out.artifacts[0].base64, 'B1');
+});
+
+test('appendArtifacts：第二次再选 1 张 → 2 张，前一张必须还在（这就是那个 bug）', () => {
+  const first = appendArtifacts([], [seed(1)], LOOK_IDS, 4).artifacts;
+  const second = appendArtifacts(first, [seed(2)], LOOK_IDS, 4);
+  assert.equal(second.artifacts.length, 2, '第二次选图必须累加，不能顶掉第一张');
+  assert.deepEqual(second.artifacts.map((a) => a.lookId), ['look1', 'look2']);
+  assert.deepEqual(second.artifacts.map((a) => a.base64), ['B1', 'B2'], '第一张内容必须原样保留');
+});
+
+test('appendArtifacts：分四次各选 1 张 → 稳定累积到 4 张、编号不重复', () => {
+  let list = [];
+  for (let i = 1; i <= 4; i += 1) {
+    list = appendArtifacts(list, [seed(i)], LOOK_IDS, 4).artifacts;
+  }
+  assert.deepEqual(list.map((a) => a.lookId), LOOK_IDS);
+  assert.deepEqual(list.map((a) => a.base64), ['B1', 'B2', 'B3', 'B4']);
+  assert.equal(new Set(list.map((a) => a.lookId)).size, 4, 'lookId 不得重复');
+});
+
+test('appendArtifacts：已满时返回 null（界面据此提示"已选满"），不替换已有内容', () => {
+  let list = [];
+  for (let i = 1; i <= 4; i += 1) list = appendArtifacts(list, [seed(i)], LOOK_IDS, 4).artifacts;
+  assert.equal(appendArtifacts(list, [seed(5)], LOOK_IDS, 4), null);
+});
+
+test('appendArtifacts：一次选多张 → 按顺序追加，不覆盖已有的', () => {
+  const first = appendArtifacts([], [seed(1)], LOOK_IDS, 4).artifacts;
+  const out = appendArtifacts(first, [seed(2), seed(3)], LOOK_IDS, 4);
+  assert.deepEqual(out.artifacts.map((a) => a.lookId), ['look1', 'look2', 'look3']);
+  assert.deepEqual(out.artifacts.map((a) => a.base64), ['B1', 'B2', 'B3']);
+});
+
+test('appendArtifacts：超出上限的部分丢弃', () => {
+  const out = appendArtifacts([], [seed(1), seed(2), seed(3), seed(4), seed(5), seed(6)], LOOK_IDS, 4);
+  assert.equal(out.artifacts.length, 4);
+  assert.deepEqual(out.artifacts.map((a) => a.lookId), LOOK_IDS);
+});
+
+test('appendArtifacts：本次没选到东西 → null（不产生空状态）', () => {
+  assert.equal(appendArtifacts([], [], LOOK_IDS, 4), null);
+  assert.equal(appendArtifacts([], [null, undefined], LOOK_IDS, 4), null);
+});
+
+test('appendArtifacts：不改入参（纯函数）', () => {
+  const existing = [{ lookId: 'look1', base64: 'B1' }];
+  const snapshot = JSON.stringify(existing);
+  appendArtifacts(existing, [seed(2)], LOOK_IDS, 4);
+  assert.equal(JSON.stringify(existing), snapshot, '不得就地修改已有列表');
+});
+
+test('appendArtifacts：忽略没有 lookId 的脏条目，不因此错位编号', () => {
+  const dirty = [{ lookId: 'look1', base64: 'B1' }, { base64: 'no-id' }, null];
+  const out = appendArtifacts(dirty, [seed(2)], LOOK_IDS, 4);
+  assert.equal(out.artifacts.length, 2);
+  assert.deepEqual(out.artifacts.map((a) => a.lookId), ['look1', 'look2']);
 });
 
 test('rankLooks：降序、null 垫底、同分 lookId 升序、rank 1-based、不改入参', () => {

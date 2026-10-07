@@ -12,7 +12,7 @@ import {
   selectDeepFor,
   selectRankedLooks,
 } from './src/core/flow.js';
-import { MAX_LOOKS, SCORE_QUESTION_IDS } from './src/core/protocol.js';
+import { MAX_LOOKS, SCORE_QUESTION_IDS, appendArtifacts } from './src/core/protocol.js';
 import { buildScoreQuestions } from './src/core/prompts.js';
 import { rankLooks } from './src/core/scoring.js';
 import { stateSummary, validateInput } from './src/core/state.js';
@@ -570,24 +570,25 @@ export default function App() {
 
       // 关键：**追加**而不是替换。之前直接 dispatch SET_ARTIFACTS（替换全部），
       // 用户分两次各选 1 张时，第二次会把前一张冲掉 —— 看起来就像"只能上传一张"。
+      // 追加规则抽成 appendArtifacts 纯函数（src/core/protocol.js），有直接单测。
       const existing = flowRef.current?.artifacts || [];
-      const slotIds = LOOK_IDS.slice(existing.length, existing.length + MAX_LOOKS);
-      if (!slotIds.length) return; // 已满，交给界面提示"已选满"
+      if (existing.length >= MAX_LOOKS) return; // 已满，界面会显示"已选满"
 
-      const added = [];
-      const assets = result.assets.slice(0, slotIds.length);
-      for (let index = 0; index < assets.length; index += 1) {
-        const artifact = await toArtifact(assets[index], slotIds[index]);
-        if (artifact) added.push(artifact);
+      const seeds = [];
+      for (const asset of result.assets.slice(0, MAX_LOOKS - existing.length)) {
+        const artifact = await toArtifact(asset, 'seed');
+        if (artifact) seeds.push(artifact);
       }
-      if (!added.length) {
+      if (!seeds.length) {
         // 选图/读取失败：动作是「换图」，与 invalid_input 一致。
         // 文案必须来自 copy.js（AGENTS.md 代码约定），不得手写。
         dispatch({ type: 'SET_ERROR', error: invalidInputError() });
         return;
       }
+      const appended = appendArtifacts(existing, seeds, LOOK_IDS, MAX_LOOKS);
+      if (!appended) return;
 
-      const next = [...existing, ...added].slice(0, MAX_LOOKS);
+      const next = appended.artifacts;
       imagesRef.current = Object.fromEntries(next.map((item) => [item.lookId, item]));
       setExpandedLookId(null);
       dispatch({ type: 'SET_ARTIFACTS', artifacts: next });
