@@ -106,6 +106,8 @@ export function makeFetchMock(options = {}) {
   const healthStatus = Number.isFinite(options.healthStatus) ? options.healthStatus : 200;
   const timeoutHangMs = Number.isFinite(options.timeoutHangMs) ? options.timeoutHangMs : 30000;
   const failures = { ...(options.failures || {}) };
+  // deepEmptyOnce：只在**第一次** deep 请求返回空正文（模拟 reasoning 偶发吃光预算）
+  let deepEmptyOnceUsed = false;
   const noBatch = options.noBatch === true;
   let scenario = options.scenario || 'normal';
 
@@ -174,7 +176,13 @@ export function makeFetchMock(options = {}) {
     if (failure && Number.isFinite(failure.status)) {
       return jsonResponse({ error: { message: 'injected failure' } }, failure.status);
     }
-    return jsonResponse(payloadFor(body, model, failure));
+    // deepEmptyOnce 的"已用过"标记放在闭包里，才能跨请求持久（failure 对象每次新建）
+    let effectiveFailure = failure;
+    if (failure && failure.deepEmptyOnce === true) {
+      effectiveFailure = { ...failure, deepEmpty: !deepEmptyOnceUsed };
+      deepEmptyOnceUsed = true;
+    }
+    return jsonResponse(payloadFor(body, model, effectiveFailure));
   }
 
   /**
@@ -222,7 +230,7 @@ export function makeFetchMock(options = {}) {
 
     if (questions.some((item) => item && item.id === 'deep_report')) {
       const ids = images.map((image) => image && image.id).filter((id) => LOOK_IDS.includes(id));
-      const content = failure.deepEmpty ? '' : JSON.stringify(deepReportForLookIds(ids));
+      const content = failure.deepEmpty === true ? '' : JSON.stringify(deepReportForLookIds(ids));
       return {
         model: requestModel,
         answers: [{ id: 'deep_report', type: 'text', content, confidence: 0.9 }],

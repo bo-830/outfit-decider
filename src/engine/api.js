@@ -20,7 +20,8 @@ export const DEFAULT_CONFIG = {
   visionBaseUrl: '',
   visionModel: '',
   visionApiKey: '',
-  visionTimeoutMs: 60000,
+  // 深度分析实测 15–37 秒（多图更久），原 60s 余量偏紧；放宽避免把"慢"误报成超时。
+  visionTimeoutMs: 120000,
   // 视觉模型是否已配在**服务端**（如本机 Laya 适配器用自己的 .env.local 配好）。
   // 只影响设置页的配置闸门顺序，不改变运行时行为。
   visionServerSide: false,
@@ -28,14 +29,18 @@ export const DEFAULT_CONFIG = {
   // 存在的理由：视觉端点本身出问题时，必须还能配一个可用的决策模型，否则 App 变砖。
   decisionUnlocked: false,
   // 推理模型的输出预算。太小 → reasoning 吃光 → content 空串（HTTP 200），
-  // 会被误判成 parse 失败。纠正一次要给 N 套 × 6 维分数，留足余量。
-  visionMaxTokens: 4000,
+  // 会被误判成 parse 失败。实测 deepseek-flash 在 4000 时约 1/4 的深度分析
+  // 返回空串，提到 8000 后 5/5 通过（见 tools 里的诊断脚本）。
+  // 深度分析要输出 ranking+details(每套5维)+conclusion，本身就比纠正更长。
+  visionMaxTokens: 8000,
   baseUrl: 'http://127.0.0.1:8787',
   askPath: '/ask',
   healthPath: '/health',
   model: 'outfit-judge-v1',
   apiKey: '',
-  timeoutMs: 45000,
+  // 深度分析走 decision 通道（visionServerSide 形态），所以这条超时必须够长：
+  // 实测 15–37s，且 reasoning 预算提高后偏慢的一侧更常见。
+  timeoutMs: 120000,
   quickTimeoutMs: 20000,
 };
 

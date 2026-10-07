@@ -279,6 +279,48 @@ test('deepSystem.analyze：2 套时条数 = 2；空 content → parse', async ()
   );
 });
 
+test('deepSystem.analyze：空正文自动重投一次（reasoning 偶发吃光 max_tokens）', async () => {
+  // 实测约 1/4 的深度分析返回 HTTP 200 但 content 为空串（推理模型把预算花在 reasoning 上）。
+  // 这类失败是随机的，重投一次几乎必然成功 —— 用户不该看到"请重试一次"。
+  const mock = makeFetchMock({ failures: { look1: { deepEmptyOnce: true } } });
+  const deep = makeDeepSystem({ api: apiWith(mock), model: 'm' });
+  const report = await deep.analyze({
+    artifacts: artifacts(['look1']),
+    userState: STATE,
+    question: QUESTION,
+  });
+
+  assert.equal(mock.calls.length, 2, '第一次空正文 → 必须自动重投一次');
+  assert.ok(report.ranking.length >= 1, '重投后必须拿到可解析的报告');
+  assert.ok(LOOKS.includes(report.conclusion.pick));
+});
+
+test('deepSystem.analyze：一直空正文 → 重投后仍失败，报 parse（不无限重试）', async () => {
+  const mock = makeFetchMock({ failures: { look1: { deepEmpty: true } } });
+  const deep = makeDeepSystem({ api: apiWith(mock), model: 'm' });
+  await assert.rejects(
+    () => deep.analyze({ artifacts: artifacts(['look1']), userState: STATE, question: QUESTION }),
+    (err) => err.kind === 'parse',
+  );
+  assert.equal(mock.calls.length, 2, '最多重投一次，不得无限重试');
+});
+
+test('deepSystem.analyze：取消（signal 已 abort）时不得重投', async () => {
+  const mock = makeFetchMock({ failures: { look1: { deepEmpty: true } } });
+  const deep = makeDeepSystem({ api: apiWith(mock), model: 'm' });
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(() =>
+    deep.analyze({
+      artifacts: artifacts(['look1']),
+      userState: STATE,
+      question: QUESTION,
+      signal: controller.signal,
+    }),
+  );
+  assert.equal(mock.calls.length, 1, '用户已取消就不该再打一次');
+});
+
 test('parseDeepReport：代码块/前后缀、排序、5 维固定、越界钳制、pick 回落', () => {
   const fixture = loadDeepFixture('report-4looks');
   const parsed = parseDeepReport(JSON.stringify(fixture));

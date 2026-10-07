@@ -11,25 +11,57 @@ const STAR_STEP = 0.5;
 const STAR_MAX = 5;
 
 export function makeDeepSystem({ api, model } = {}) {
+  /** 取正文：优先 id=deep_report 的 text 答案，容忍对端只给 type='text'。 */
+  function contentOf(response) {
+    const answers = response && Array.isArray(response.answers) ? response.answers : [];
+    const answer = answers.find((item) => item && item.id === DEEP_QUESTION_ID && typeof item.content === 'string')
+      || answers.find((item) => item && item.type === 'text' && typeof item.content === 'string')
+      || answers[0];
+    return {
+      content: answer && typeof answer.content === 'string' ? answer.content : '',
+      found: !!(answer && typeof answer.content === 'string'),
+    };
+  }
+
+  async function requestOnce({ userText, images, signal }) {
+    return api.ask({
+      state: userText,
+      questions: [{ id: DEEP_QUESTION_ID, type: 'text', question: DEEP_SYSTEM_PROMPT }],
+      images,
+      signal,
+      model,
+    });
+  }
+
   async function analyze({ artifacts, userState, question, signal } = {}) {
     const list = (Array.isArray(artifacts) ? artifacts : []).filter((item) => item && item.lookId);
     if (!list.length) throw parseFailure();
     const lookIds = [];
     for (const item of list) if (!lookIds.includes(item.lookId)) lookIds.push(item.lookId);
 
-    const response = await api.ask({
-      state: buildDeepUserText({ userState, question }),
-      questions: [{ id: DEEP_QUESTION_ID, type: 'text', question: DEEP_SYSTEM_PROMPT }],
-      images: list.map((item) => ({ id: item.lookId, dataUri: toDataUri(item) })),
-      signal,
-      model,
-    });
+    const userText = buildDeepUserText({ userState, question });
+    const images = list.map((item) => ({ id: item.lookId, dataUri: toDataUri(item) }));
 
-    const answers = response && Array.isArray(response.answers) ? response.answers : [];
-    const answer = answers.find((item) => item && item.id === DEEP_QUESTION_ID && typeof item.content === 'string')
-      || answers.find((item) => item && item.type === 'text' && typeof item.content === 'string')
-      || answers[0];
-    const content = answer && typeof answer.content === 'string' ? answer.content : '';
+    let response = await requestOnce({ userText, images, signal });
+    let { content, found } = contentOf(response);
+
+    /**
+     * 空正文 → **自动重投一次**（SPEC §5.1 / §3.9）。
+     *
+     * 为什么必须有：多模态推理模型会把 `max_tokens` 花在 reasoning 上，
+     * 偶尔（实测约 1/4）返回 HTTP 200 **但 content 是空串** —— 对端完全正常，
+     * 只是那一轮预算被推理吃光了。这类失败是随机的，重投一次几乎必然成功
+     * （实测把预算提到 8000 后 5/5 通过，但仍保留重试作为兜底）。
+     *
+     * 不重试的情况：用户主动取消（signal 已 abort）；已有正文但**解析**失败
+     * （那是内容形态问题，重投不一定有帮助，且会让延迟翻倍）。
+     */
+    const aborted = signal && signal.aborted;
+    if (!aborted && (!found || !content.trim())) {
+      response = await requestOnce({ userText, images, signal });
+      ({ content, found } = contentOf(response));
+    }
+
     if (!content.trim()) throw parseFailure();
     return parseDeepReport(content, { lookIds });
   }

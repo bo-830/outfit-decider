@@ -6,7 +6,7 @@
 版本：v1.6（v1 = Phase 0 冻结；v1.1 §2.1 三个设置页 testID；v1.2 §7.0 门禁命令形式；
 v1.3 §3.7 describe 必须带图、§2.1 `ranked[].scores`；v1.4 §5.1 重试口径与时间预期；
 v1.5 §3.9b 多模态纠正、§3.9c 三档引擎模式；v1.6 §3.11b 批处理打分、§3.11c 设置页配置顺序；
-v1.7 §3.13b 用户自选 System One / System Two） · 适用范围：`src/core/**`、`src/data/**`、`src/engine/**`、`src/store/**`、
+v1.7 §3.13b 用户自选 System One / System Two、§4.1.2 挑图期间免清空、§5.5 空正文自动重投） · 适用范围：`src/core/**`、`src/data/**`、`src/engine/**`、`src/store/**`、
 `src/ui/theme.js`、`src/components/**`、`src/screens/**`、`App.jsx`、`tools/**`、`tests/**`
 
 ---
@@ -400,11 +400,16 @@ export const DEFAULT_CONFIG = {
   engineMode: 'laya_review',          // 'laya_only' | 'laya_review' | 'multimodal_only'（§3.9c）
   visionBaseUrl: '',                  // 可选：OpenAI 兼容多模态端点（describe 与纠正用）
   visionModel: '',                    // 可选：多模态模型名
+  visionApiKey: '',
+  visionTimeoutMs: 120000,            // 深度分析实测 15–37s，60s 余量偏紧（v1.7 放宽）
+  visionServerSide: false,            // §3.11c：视觉配置在服务端（本机适配器形态）
+  decisionUnlocked: false,            // §3.11c：用户显式绕过"视觉先行"闸门
+  visionMaxTokens: 8000,              // 推理模型的输出预算；4000 时实测约 1/4 深度分析返回空串
   baseUrl: 'http://127.0.0.1:8787',
   askPath: '/ask', healthPath: '/health',
   model: 'outfit-judge-v1',
   apiKey: '',                         // 仅 JEv
-  timeoutMs: 45000, quickTimeoutMs: 20000,
+  timeoutMs: 120000, quickTimeoutMs: 20000,
 };
 export function normalizeBaseUrl(url)   // → 去尾部 '/'；无 scheme 时补 'http://'；同时兼容 192.168.1.5:8787 这类输入
 export function makeApi({ config, fetchImpl = globalThis.fetch })  // → Api
@@ -641,6 +646,32 @@ mock 服务据 `images` 长度与 `state` 文本决定"看"到几套。
 ### 5.4 部分失败
 4 套中部分套失败：成功的正常出分，失败套在结果页显示「这套没看清，点这里单独重试」（可单独重跑该套）。
 全部失败才走 `invalid_input`。
+
+### 5.5 推理模型"空正文"必须自动重投（v1.7 新增）
+
+**现象**：多模态推理模型（如 `deepseek-flash`）会把 `max_tokens` 花在 reasoning 上，
+偶尔返回 **HTTP 200 但 `content` 是空字符串**。对端完全正常，只是那一轮预算被推理吃光，
+用户侧看到的就是"模型返回的内容看不懂，请重试一次"。
+
+**实测数据**（真实 DeepSeek，深度分析同 prompt 连打）：
+
+```
+visionMaxTokens=4000 → 3/4 通过，失败那次 28s 且 content 长度 0
+visionMaxTokens=8000 → 5/5 通过
+```
+
+**要求**：
+1. `visionMaxTokens` 默认 **8000**（4000 太小；深度分析要输出 ranking + details(每套 5 维) + conclusion，
+   本身就比纠正更长）。同时把 `visionTimeoutMs` 与 decision `timeoutMs` 放宽到 **120000**
+   （实测 15–37s，提高预算后偏慢一侧更常见）。
+2. **空正文自动重投一次**（`deepSystem.analyze`）。这类失败是随机的，重投几乎必然成功，
+   用户不该为此手动重试。
+   - **不重投**：用户已取消（`signal.aborted`）；已有正文但**解析**失败
+     （那是内容形态问题，重投不一定有用且会让延迟翻倍）。
+   - **最多重投一次**，不得无限重试。
+
+**与 §5.1 的关系**：§5.1 的自动重试按**错误类别**（network/timeout/rate_limit/server）；
+这里是"响应成功但正文为空"的语义失败，类别是 `parse`，所以必须单独处理 —— 不能指望 §5.1 兜住。
 
 ---
 

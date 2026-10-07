@@ -24,16 +24,18 @@ test('DEFAULT_CONFIG 与 SPEC §3.10 逐字一致', () => {
     visionBaseUrl: '',
     visionModel: '',
     visionApiKey: '',
-    visionTimeoutMs: 60000,
+    // 深度分析实测 15–37s；8000 预算下偏慢一侧更常见，所以两条超时都放宽
+    visionTimeoutMs: 120000,
     visionServerSide: false,
     decisionUnlocked: false,
-    visionMaxTokens: 4000,
+    // reasoning 模型会把预算花在 reasoning 上：4000 时实测约 1/4 深度分析返回空串
+    visionMaxTokens: 8000,
     baseUrl: 'http://127.0.0.1:8787',
     askPath: '/ask',
     healthPath: '/health',
     model: 'outfit-judge-v1',
     apiKey: '',
-    timeoutMs: 45000,
+    timeoutMs: 120000,
     quickTimeoutMs: 20000,
   });
 });
