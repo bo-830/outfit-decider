@@ -182,6 +182,41 @@ tools\start-outfit-decider.bat stop     # 收工（按 PID + 端口精确停，�
 
 ## 2. 接你自己的决策模型
 
+### 2.0 切到 TypeSafe JEv（一条命令）
+
+```powershell
+tools\use-jev.bat          # 切到 JEv
+tools\use-jev.bat laya     # 切回本机 Laya
+```
+
+它只改 `.env.local` 里三个 `LAYA_*` 键（**不碰 App 的任何设置**），然后打印 App 该填什么。
+改完重启适配器：`stop-outfit-decider.bat` → `start-outfit-decider.bat`。
+
+**App 设置页填**：baseUrl 仍指适配器（真机 `http://<LAN IP>:8787`、模拟器 `http://127.0.0.1:8787`），
+askPath `/ask`、healthPath `/health`，**模型名 `jev-latest`**，**API Key 留空**。
+
+**为什么 Key 不填在 App 里**：App **从不直连 JEv**。App 发的是 `questions` **数组**，
+而 JEv 文档要求 **map**（`id → {type, instructions, criteria}`）；这层翻译在适配器里，
+Key 也只留在本机 `.env.local`，绝不下发到手机。
+
+**要真正跑起来还需一行 Key**（没有它上游返回 401/403，这是预期而非故障）：
+
+```
+LAYA_API_KEY=<你的 TypeSafe key>      # https://console.typesafe.ai/keys
+```
+
+加进 `.env.local` 后重跑 `tools\use-jev.bat`。JEv 模式下 `/health` 只判断主机可达，
+并把 401/403 标成 `authRequired: true` —— 不会把"缺 Key"假报成"服务挂了"。
+
+**已验证到哪一步**（没 Key 时能验的都验了）：
+
+```
+适配器日志: laya-adapter listening on http://0.0.0.0:8787 -> https://api.typesafe.ai
+[adapter] /ask -> 403 questions=6 ms=834
+```
+
+即请求形状被接受、真的抵达 `api.typesafe.ai/v1/systemone`，只因缺 Key 被拒。
+
 设置页三个字段决定一切：
 
 | 字段 | 说明 |

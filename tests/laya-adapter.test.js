@@ -72,9 +72,22 @@ test('SCORE_INSTRUCTIONS：6 个维度都有模板，且都带 {scene} 占位符
   }
 });
 
-test('toLayaRequest：不带 --model 时不塞 model 字段（交给 Laya 自己路由）', () => {
-  const out = toLayaRequest({ state: 's', questions: APP_QUESTIONS });
-  assert.ok(!('model' in out), 'MODEL 为空时不应出现 model 字段');
+test('toLayaRequest：模型名三档优先级（显式 > 配置 > App 原名）', () => {
+  // 这条断言必须用**显式传参**控制模型名，不能依赖"MODEL 为空"这个前提：
+  // 适配器导入时会加载开发者的 .env.local，一旦那里写了 LAYA_MODEL，
+  // "配置为空"就不成立了 —— 实测就是这么红的。
+  const base = { state: 's', questions: APP_QUESTIONS };
+
+  // 1) 显式注入优先（测试用它控制）
+  assert.ok(!('model' in toLayaRequest(base, { model: '' })), '显式空字符串 = 不塞 model 字段');
+  assert.equal(toLayaRequest(base, { model: 'jev-latest' }).model, 'jev-latest');
+
+  // 2) 都没给时才回落到 App 传来的名字
+  const withAppModel = toLayaRequest({ ...base, model: 'outfit-judge-v1' }, { model: '' });
+  assert.equal(withAppModel.model, 'outfit-judge-v1', '没配置时传 App 的名字，不偷偷改');
+
+  // 3) 配置有值时以配置为准（此处用显式参数模拟）
+  assert.equal(toLayaRequest({ ...base, model: 'app-name' }, { model: 'cfg-name' }).model, 'cfg-name');
 });
 
 test('toLayaQuestion：非评分项退化为三档 score（Laya 不做文本生成）', () => {
@@ -255,3 +268,74 @@ test('端到端形状：App 请求 → Laya 请求 → Laya 响应 → App 响�
   assert.equal(appRes.model, 'outfit-judge-v1');
   assert.equal(appRes.usage.total_tokens, 216);
 });
+
+/* ── SPEC §3.10b · JEv 方言（TypeSafe，https://docs.typesafe.ai） ─────────────
+   文档关键事实（不是猜的）：
+     · POST /v1/systemone，`questions` 是 **map**（id → {type, instructions, criteria}）
+     · `criteria` 有序、索引从 0 起；"score 会落在两档之间"（3 档 → score 0..2）
+   于是 6 档 criteria **直接对应 0–5**，与 App 的 0–5 一位小数天然对齐，
+   不像 Laya 的 3 档需要把 0–2 映射上去。 */
+
+test('JEv 方言：instructions 用 App 原文，criteria 用 6 档（索引即 0–5）', () => {
+  const q = toLayaQuestion(
+    { id: 'overall_score', type: 'score', question: '正式面试穿这套得体吗？' },
+    { protocol: 'jev', scene: '正式面试' },
+  );
+  assert.equal(q.type, 'score');
+  assert.equal(q.criteria.length, 6, 'JEv 用 6 档，score 直接落在 0–5');
+  assert.equal(q.criteria[0], '完全不适合这个场合');
+  assert.equal(q.criteria[5], '非常得体');
+  assert.equal(q.instructions, '正式面试穿这套得体吗？', 'JEv 用 App 原文，不套场合模板');
+  assert.ok(!q.instructions.includes('我的问题：'), '不套用 Laya 那套模板拼接');
+});
+
+test('JEv 方言：缺 question 文本时回落到模板，不产生空 instructions', () => {
+  const q = toLayaQuestion({ id: 'scene_score' }, { protocol: 'jev', scene: '通勤上班' });
+  assert.ok(q.instructions.length > 0);
+  assert.equal(q.criteria.length, 6);
+});
+
+test('Laya 方言不被改动（回归保护）：仍走它的场合模板问法', () => {
+  const q = toLayaQuestion(
+    { id: 'overall_score', type: 'score', question: '随便' },
+    { protocol: 'laya', scene: '正式面试' },
+  );
+  assert.equal(q.criteria.length, 6, 'SCORE_RUBRICS 本身是 6 档描述');
+  assert.ok(q.instructions.includes('得体'), 'Laya 仍走场合模板');
+});
+
+test('toLayaRequest：模型名由配置决定；没配就把 App 的名字原样带上（不偷偷改）', () => {
+  const laya = toLayaRequest(
+    { model: 'outfit-judge-v1', state: 'x', questions: [{ id: 'overall_score', type: 'score', question: '得体吗？' }] },
+    { protocol: 'laya', model: '' },
+  );
+  assert.equal(laya.model, 'outfit-judge-v1');
+
+  // JEv 的模型名（jev-latest）由 tools/use-jev.bat 写进 .env.local 的 LAYA_MODEL，
+  // 不在代码里硬编码 —— 这里只保证 JEv 请求形状正确。
+  const jevShape = toLayaRequest(
+    { state: '【我的场合】正式面试', questions: [{ id: 'overall_score', type: 'score', question: '得体吗？' }] },
+    { protocol: 'jev', model: '' },
+  );
+  assert.equal(jevShape.state, '【我的场合】正式面试');
+  assert.equal(Array.isArray(jevShape.questions), false, 'JEv 要求 questions 是 map，不能是数组');
+  assert.equal(jevShape.questions.overall_score.type, 'score');
+  assert.equal(jevShape.questions.overall_score.criteria.length, 6);
+});
+
+test('toLayaRequest：两种方言都产出 map 形状的 questions', () => {
+  for (const protocol of ['laya', 'jev']) {
+    const req = toLayaRequest({ state: 'x', questions: APP_QUESTIONS }, { protocol });
+    assert.equal(Array.isArray(req.questions), false, `${protocol}: questions 必须是 map`);
+    assert.deepEqual(Object.keys(req.questions).sort(), APP_QUESTIONS.map((q) => q.id).sort());
+  }
+});
+
+test('非评分项：两种方言都退化为三档（上游都不做文本生成）', () => {
+  for (const protocol of ['laya', 'jev']) {
+    const q = toLayaQuestion({ id: 'custom_reply', type: 'text', question: '哪套更显瘦？' }, { protocol });
+    assert.equal(q.type, 'score');
+    assert.deepEqual(q.criteria, ['无法回答', '部分回答', '可以回答']);
+  }
+});
+

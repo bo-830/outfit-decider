@@ -95,6 +95,20 @@ const VISION_API_KEY = env('VISION_API_KEY') || '';
 const VISION_MODEL = env('VISION_MODEL') || '';
 const VISION_MAX_TOKENS = Number(env('VISION_MAX_TOKENS') || 4000);
 
+/**
+ * 上游方言（SPEC §3.10b）。
+ *
+ * `laya` —— 本机 laya-serve 的 `/v1/systemone`：**3 档** criteria，需要把 0–2 映射到 0–5。
+ * `jev`  —— TypeSafe JEv 的 `/v1/systemone`（https://api.typesafe.ai/v1/systemone）：
+ *            文档明确 `criteria` 是有序档位、索引从 0 起、"score 会落在两档之间"，
+ *            所以 **6 档 criteria 直接对应 0–5**，无需映射，且天然支持 App 要求的 1 位小数。
+ *
+ * 两种方言的**响应形状几乎一致**（`answers` map、`score`/`probabilities`/`confidence`），
+ * 所以响应翻译可以共用；差别只在 criteria 档数与上游地址/模型名。
+ */
+const PROTOCOL = (argValue('protocol', env('LAYA_PROTOCOL') || 'laya')).toLowerCase() === 'jev' ? 'jev' : 'laya';
+const SYSTEMONE_PATH = '/v1/systemone';
+
 const SCORE_MIN = 0;
 const SCORE_MAX = 5;
 
@@ -141,14 +155,32 @@ export function sceneOf(stateText) {
   return first || '日常出门';
 }
 
-/** App 的 question 项 → Laya 的 {type, instructions, criteria}。 */
+/**
+ * App 的 question 项 → 上游的 {type, instructions, criteria}。
+ * @param {object} item App 侧问题项
+ * @param {{scene?: string, protocol?: 'laya'|'jev'}} context 场合与方言；
+ *        protocol 默认取模块级 PROTOCOL，显式传入是为了让测试能覆盖两种方言
+ *        （模块常量在导入时就固定了，否则只能测到当前运行的那一种）。
+ */
 export function toLayaQuestion(item, context = {}) {
+  const protocol = context.protocol === 'jev' ? 'jev' : context.protocol === 'laya' ? 'laya' : PROTOCOL;
   const id = String(item && item.id ? item.id : '');
   const scene = context.scene || '日常出门';
+  const extra = String(item && item.question ? item.question : '').trim();
   if (SCORE_IDS.includes(id)) {
+    if (protocol === 'jev') {
+      // JEv 是**指令型**模型：直接用 App 的问题文本当 instructions 最忠实，
+      // 而 SCORE_RUBRICS 的 6 档正好对应 JEv 的 0–5（索引从 0 起，score 可落在档位之间）。
+      // 这里刻意**不套用** Laya 那套措辞 —— 那是为 Laya 的低信息量问句实测调出来的，
+      // 换到 JEv 上属于无据改动。
+      return {
+        type: 'score',
+        instructions: extra || SCORE_INSTRUCTIONS[id] || `${scene}穿这一套得体吗？`,
+        criteria: SCORE_RUBRICS[id],
+      };
+    }
     const template = SCORE_INSTRUCTIONS[id] || '{scene}穿这一套得体吗？';
     // App 传来的 question 文本作为补充上下文附在后面，保留用户自定义问题的信息
-    const extra = String(item && item.question ? item.question : '').trim();
     const instructions = `${template.replace('{scene}', scene)}`.trim();
     return {
       type: 'score',
@@ -156,26 +188,36 @@ export function toLayaQuestion(item, context = {}) {
       criteria: SCORE_RUBRICS[id],
     };
   }
-  // 非评分项（图片描述、自填问题的文字回答）：Laya 不做文本生成，
-  // 用三档 score 表达“能/不能/不确定”，由上层决定怎么用。
+  // 非评分项：Laya 不做文本生成；JEv 同样只答 typed question，
+  // 所以两者都用档位表达"能不能回答"，由上层决定怎么用。
   return {
     type: 'score',
-    instructions: String(item && item.question ? item.question : '').trim() || id,
+    instructions: extra || id,
     criteria: ['无法回答', '部分回答', '可以回答'],
   };
 }
 
-/** App 请求体 → Laya 请求体。 */
-export function toLayaRequest(body) {
+/**
+ * App 请求体 → 上游请求体（两种方言共用同一形状：state + questions map）。
+ *
+ * 模型名解析顺序：`options.model`（显式注入，供测试）→ 配置的 `MODEL`（LAYA_MODEL）
+ * → App 传来的名字。显式参数排在配置前面，是为了让单测能控制这个值：
+ * 适配器在导入时会加载开发者的 `.env.local`，若测试只能读配置，
+ * 结果就会随本机环境变化（实测：`.env.local` 一旦写上 LAYA_MODEL，原有单测全红）。
+ */
+export function toLayaRequest(body, options = {}) {
   const questions = {};
   const incoming = Array.isArray(body && body.questions) ? body.questions : [];
-  const context = { scene: sceneOf(body && body.state) };
+  const context = { scene: sceneOf(body && body.state), protocol: options.protocol || PROTOCOL };
   for (const item of incoming) {
     if (!item || !item.id) continue;
     questions[String(item.id)] = toLayaQuestion(item, context);
   }
   const out = { state: body && body.state !== undefined ? body.state : '', questions };
-  if (MODEL) out.model = MODEL;
+  // 上游要什么名字由配置决定，不在代码里偷偷改；都没给才回落到 App 的名字。
+  const configuredModel = typeof options.model === 'string' ? options.model : MODEL;
+  if (configuredModel) out.model = configuredModel;
+  else if (body && body.model) out.model = body.model;
   return out;
 }
 
@@ -673,17 +715,39 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'GET' && (url.pathname === '/health' || url.pathname === '/healthz')) {
     let upstream = { ok: false, detail: 'unreachable' };
-    try {
-      const r = await fetchJson(`${UPSTREAM}/health`, {
-        headers: UPSTREAM_KEY ? { Authorization: `Bearer ${UPSTREAM_KEY}` } : {},
-      }, 5000);
-      upstream = { ok: r.status === 200, status: r.status, detail: (r.json && r.json.status) || r.text.slice(0, 120) };
-    } catch (err) {
-      upstream = { ok: false, detail: String(err && err.message ? err.message : err) };
+    if (PROTOCOL === 'jev') {
+      /**
+       * JEv 没有公开的 health 端点（文档只有 `POST /v1/systemone`）。
+       * 所以这里退一步：只判断**主机是否可达**，并用 401/403 反向证明"可达且服务活着"。
+       * 绝不把"没带 Key 所以 401"当成故障 —— 用户明确说不提供 Key、也不跑连通性测试，
+       * 那种情况下把 authenticated 需求报成"服务挂了"是假警报。
+       */
+      try {
+        const r = await fetchJson(`${UPSTREAM}/v1/systemone`, { method: 'GET' }, 6000);
+        const authed = r.status === 401 || r.status === 403;
+        upstream = {
+          ok: true,
+          status: r.status,
+          detail: authed ? 'reachable (auth required)' : `reachable (HTTP ${r.status})`,
+          authRequired: authed,
+        };
+      } catch (err) {
+        upstream = { ok: false, detail: String(err && err.message ? err.message : err) };
+      }
+    } else {
+      try {
+        const r = await fetchJson(`${UPSTREAM}/health`, {
+          headers: UPSTREAM_KEY ? { Authorization: `Bearer ${UPSTREAM_KEY}` } : {},
+        }, 5000);
+        upstream = { ok: r.status === 200, status: r.status, detail: (r.json && r.json.status) || r.text.slice(0, 120) };
+      } catch (err) {
+        upstream = { ok: false, detail: String(err && err.message ? err.message : err) };
+      }
     }
     sendJson(res, 200, {
       ok: true,
       adapter: 'laya-adapter',
+      protocol: PROTOCOL,
       upstream,
       vision: VISION_BASE_URL ? { configured: true, model: VISION_MODEL } : { configured: false },
     });
@@ -764,7 +828,7 @@ const server = http.createServer(async (req, res) => {
         result = await handleDescribe(body);
       } else {
         const layaBody = toLayaRequest(body);
-        const r = await fetchJson(`${UPSTREAM}/v1/systemone`, {
+        const r = await fetchJson(`${UPSTREAM}${SYSTEMONE_PATH}`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -797,7 +861,7 @@ const server = http.createServer(async (req, res) => {
   sendJson(res, 404, { error: { message: 'not found' } });
 });
 
-export { server, UPSTREAM, PORT, HOST };
+export { server, UPSTREAM, PORT, HOST, PROTOCOL };
 
 const isMain = process.argv[1] && import.meta.url === new URL(`file://${process.argv[1].replace(/\\/g, '/')}`).href;
 if (isMain || process.env.LAYA_ADAPTER_START === '1') {

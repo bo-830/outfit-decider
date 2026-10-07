@@ -446,6 +446,35 @@ export function makeOrchestrator({ api, model, concurrency = 4 })   // → Orche
 // 全部套都无法识别 → 抛 {kind:'invalid_input', message: copy.UNRECOGNIZABLE}（§5.1 文案）
 ```
 
+### 3.11 上游方言：Laya 与 JEv（v1.7 新增）
+
+适配器（`tools/laya-adapter.mjs`）支持两种**上游方言**，由 `LAYA_PROTOCOL` 选择：
+
+| | `laya`（默认） | `jev` |
+|---|---|---|
+| 上游 | `http://127.0.0.1:8000` | `https://api.typesafe.ai` |
+| 路径 | `POST /v1/systemone` | `POST /v1/systemone` |
+| `criteria` 档数 | **3 档**（0–2）→ 需映射到 0–5 | **6 档**（0–5）→ **直通** |
+| 模型名 | 交 Laya 自己路由（`LAYA_MODEL` 不设） | `jev-latest`（官方别名） |
+| 鉴权 | 无（`LAYA_API_KEY` 可选，出站才用） | **必须** `Authorization: Bearer <key>` |
+
+依据（官方文档 https://docs.typesafe.ai，非推测）：
+- `POST https://api.typesafe.ai/v1/systemone`，头 `Authorization: Bearer <API_KEY>`；
+- 请求体 `{state, model, questions}`，其中 **`questions` 是 map**（id → Question），
+  每个 Question 是 `{type, instructions, criteria}`；
+- `criteria` 是**有序**档位数组、**索引从 0 起**，"score 会落在两档之间"
+  （3 档 → score 0..2）。所以 6 档 criteria 直接对应 0–5，
+  且"可落在两档之间"天然满足 App 要求的 1 位小数 —— **不需要任何映射**。
+
+**关键点**：App 侧发的是 `questions` **数组**，JEv 要的是 **map**。这层翻译在适配器里，
+所以**换决策模型不必改 App 的任何设置**（App 永远只连适配器）。
+
+`jev` 方言下的 health：JEv 没有公开 health 端点，因此只判断主机可达，
+并把 **401/403 视为"可达且服务活着"**（`authRequired: true`）——
+没 Key 时把鉴权需求报成"服务挂了"是假警报。
+
+切换与配置见 `tools/use-jev.bat`；Key 只写在本机 `.env.local`，**绝不下发到手机**。
+
 ### 3.11b 批处理打分（v1.6 新增）
 
 **动机**：`scoreSystem` 原本对每套发一次 `/ask`（4 套 = 4 次往返）。Laya 的
