@@ -119,6 +119,8 @@ export default function App() {
   const [visionConn, setVisionConn] = useState(null);
   const [testingVision, setTestingVision] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  // DIAGNOSTIC (temporary): 上传页可见的选择流程 trace，只存计数与原因，定位后删除
+  const [diagTrace, setDiagTrace] = useState('');
   /**
    * SPEC §3.13 v1.7 · 本次要跑哪个系统：'quick' | 'deep' | 'both'。
    *
@@ -557,6 +559,10 @@ export default function App() {
   /* ── 选图 / 删除 ──────────────────────────────────────── */
   const pickImages = useCallback(async () => {
     setPickBusy(true);
+    // DIAGNOSTIC (temporary): 用户实测"加第二套会顶掉第一套"，而 state 恒为 1。
+    // 只看 state 无法判断是哪一步 return 的，所以把每一步结果写进内存 trace
+    // （**只记计数与原因，绝不记图片/Key**），直接显示在上传页。
+    // 定位后连同 CaptureScreen 的 diag 行一起删除。
     try {
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ['images'],
@@ -566,16 +572,17 @@ export default function App() {
         base64: true,
         exif: false,
       });
-      if (result.canceled || !result.assets?.length) return;
+      if (result.canceled || !result.assets?.length) {
+        setDiagTrace((t) => `${t} | cancel/empty(assets=${result.assets ? result.assets.length : 'n/a'})`);
+        return;
+      }
 
       // 关键：**追加**而不是替换。之前直接 dispatch SET_ARTIFACTS（替换全部），
       // 用户分两次各选 1 张时，第二次会把前一张冲掉 —— 看起来就像"只能上传一张"。
       // 追加规则抽成 appendArtifacts 纯函数（src/core/protocol.js），有直接单测。
       const existing = flowRef.current?.artifacts || [];
-      if (existing.length >= MAX_LOOKS) {
-        console.log(`[ODPICK] early-return: full existing=${existing.length}`);
-        return; // 已满，界面会显示"已选满"
-      }
+      setDiagTrace((t) => `${t} | pick:assets=${result.assets.length} existing=${existing.length}`);
+      if (existing.length >= MAX_LOOKS) return; // 已满，界面会显示"已选满"
 
       const seeds = [];
       for (const asset of result.assets.slice(0, MAX_LOOKS - existing.length)) {
@@ -585,24 +592,23 @@ export default function App() {
       if (!seeds.length) {
         // 选图/读取失败：动作是「换图」，与 invalid_input 一致。
         // 文案必须来自 copy.js（AGENTS.md 代码约定），不得手写。
+        setDiagTrace((t) => `${t} | seeds=0->ERR`);
         dispatch({ type: 'SET_ERROR', error: invalidInputError() });
         return;
       }
       const appended = appendArtifacts(existing, seeds, LOOK_IDS, MAX_LOOKS);
-      if (!appended) return;
+      if (!appended) {
+        setDiagTrace((t) => `${t} | append=null`);
+        return;
+      }
 
       const next = appended.artifacts;
-      // 临时诊断：用户实测"第二套顶掉第一套"，需要看到每一步的真实数量。
-      // ASCII 标记便于 adb logcat 过滤。稳定后删除。
-      console.log(
-        `[ODPICK] picked=${result.assets.length} seeds=${seeds.length} existing=${existing.length} `
-        + `existingIds=${existing.map((a) => a.lookId).join(',') || '-'} `
-        + `next=${next.length} nextIds=${next.map((a) => a.lookId).join(',')}`,
-      );
+      setDiagTrace((t) => `${t} | seeds=${seeds.length} next=${next.length}(${next.map((a) => a.lookId).join(',')})`);
       imagesRef.current = Object.fromEntries(next.map((item) => [item.lookId, item]));
       setExpandedLookId(null);
       dispatch({ type: 'SET_ARTIFACTS', artifacts: next });
     } catch {
+      setDiagTrace((t) => `${t} | throw`);
       dispatch({ type: 'SET_ERROR', error: invalidInputError() });
     } finally {
       setPickBusy(false);
@@ -781,6 +787,7 @@ export default function App() {
         onSubmit={runSelectedSystem}
         systemMode={systemMode}
         onSelectSystem={setSystemMode}
+        diagTrace={diagTrace}
         pickBusy={pickBusy}
         hints={check.hints}
         canRun={check.canRunQuick && !running}

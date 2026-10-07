@@ -53,6 +53,7 @@ export default function CaptureScreen({
   running = false,
   systemMode = 'quick',
   onSelectSystem,
+  diagTrace = '',
 }) {
   const insets = useSafeAreaInsets();
   const artifacts = flow.artifacts || [];
@@ -84,6 +85,7 @@ export default function CaptureScreen({
           <Text testID="diag-artifacts" style={styles.diag}>
             {`DIAG state=${count} ids=${(artifacts || []).map((a) => a.lookId).join('/') || '-'}`}
           </Text>
+          <Text testID="diag-trace" style={styles.diag}>{`TRACE ${diagTrace || '-'}`}</Text>
         </View>
 
         <LookGrid artifacts={artifacts} onPick={onPickImages} onRemove={onRemoveLook} busy={pickBusy} />
