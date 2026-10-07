@@ -131,6 +131,41 @@ cmd /c "npx expo start --lan"
 
 模拟器不受影响 —— 它走 `adb reverse`，所以 baseUrl 恒为默认的 `127.0.0.1:8787`。
 
+### 1.3 服务挂了怎么判断、怎么恢复
+
+**症状**：App 里打分/分析失败；手机浏览器打不开 `http://<LAN IP>:8787/health`。
+
+**第一步：确认到底哪个服务挂了。** 有个会误导人的细节 ——
+**适配器在上游（Laya）挂掉时仍然返回 HTTP 200**：
+
+```json
+{"ok":true,"adapter":"laya-adapter","upstream":{"ok":false,"detail":"fetch failed"}, ...}
+```
+
+所以**判断健康要看 `upstream.ok`，不是 HTTP 状态码**。只看 200 会得出"服务正常"的假结论，
+然后整轮打分失败、报错全是看不懂的 network/server（实测就这么踩过）。
+
+**第二步：App 已经会自己识别这两种情况**（SPEC §5.5）。打分/分析前先做一次很轻的探测：
+
+| 探测结果 | App 提示 |
+|---|---|
+| 端点 200 且 `upstream.ok=false` | 「决策模型服务没在运行（或刚退出）。请先启动它，再重新分析」 |
+| 端点不可达 / 非 2xx | 「连不上决策模型地址。请检查地址是否正确、以及服务是否已启动」 |
+| 端点是云端、没有 `upstream` 字段 | 视为健康，**不误报** |
+
+**第三步：恢复。** 脚本是**幂等**的，直接再跑一次，它只启动缺的那些：
+
+```powershell
+tools\start-outfit-decider.bat          # 真机
+tools\start-outfit-decider.bat emulator # 模拟器
+tools\start-outfit-decider.bat stop     # 收工（按 PID + 端口精确停，不误杀其他 node）
+```
+
+**持久性要说清楚**：服务以**分离进程**启动（无 `/k` 控制台窗口），stdout/stderr 落在
+`.run\*.log`，所以"为什么死了"有据可查。但它们**不是 Windows 服务**：
+正常双击运行能活过窗口关闭，但**会话注销或强制杀进程树仍会带走它们（实测验证过）**。
+真正的保障是"脚本幂等、随手重跑"，而不是"它永远不会死"。
+
 两个**实测踩过的坑**：
 
 1. **Expo Go 版本必须与项目 SDK 一致。** 模拟器里装的是 SDK 58 而项目是 SDK 57 时，

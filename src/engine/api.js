@@ -210,6 +210,67 @@ export function makeApi({ config, fetchImpl = globalThis.fetch } = {}) {
   }
 
   /**
+   * SPEC §5.5 · 决策端点是否**真的能干活**（不只是"HTTP 200"）。
+   *
+   * 为什么需要它：本机适配器在上游（Laya）挂掉时**仍然返回 HTTP 200**，只是响应体里写着
+   * `{"ok":true,"upstream":{"ok":false,"detail":"fetch failed"}}`。
+   * 只看状态码会得出"服务正常"的假结论，然后整轮打分全部失败、报错还是一堆看不懂的
+   * network/server —— 用户测得出来"连不上"却不知道为什么（实测踩过）。
+   *
+   * 因此这里在健康探测之外，**额外读一次响应体里的 upstream 字段**：
+   *   - 端点不可达 / 非 2xx            → ok:false, kind:'endpoint'
+   *   - 200 但 body 明说 upstream 挂了  → ok:false, kind:'upstream'
+   *   - 200 且没有 upstream 字段        → ok:true（云端端点/旧对端不带这个字段，属正常）
+   *
+   * 绝不因为探测本身失败就阻断用户的正常流程之外的判断：调用方决定怎么用。
+   */
+  async function diagnoseDecisionEndpoint(request = {}) {
+    const cfg = settings();
+    const doFetch = resolveFetch();
+    const base = normalizeBaseUrl(cfg.baseUrl);
+    if (!doFetch || !base) {
+      return { ok: false, kind: 'endpoint', detail: 'baseUrl 未配置' };
+    }
+    const url = `${base}${normalizePath(cfg.healthPath, DEFAULT_CONFIG.healthPath)}`;
+    const gate = createAbortGate(request.signal, pickTimeout(request.timeoutMs, null, {
+      ...cfg,
+      quickTimeoutMs: HEALTH_TIMEOUT_MS,
+      timeoutMs: HEALTH_TIMEOUT_MS,
+    }));
+    try {
+      const response = await doFetch(url, { method: 'GET', signal: gate.signal });
+      const status = Number(response && response.status);
+      const httpOk = response && typeof response.ok === 'boolean'
+        ? response.ok
+        : Number.isFinite(status) && status >= 200 && status < 300;
+      if (!httpOk) {
+        return { ok: false, kind: 'endpoint', detail: `HTTP ${Number.isFinite(status) ? status : '?'}` };
+      }
+      // 读 body 只为看 upstream；读不出来（空体/非 JSON）不影响"端点是活的"这个结论
+      let body = null;
+      try {
+        if (response && typeof response.json === 'function') body = await response.json();
+      } catch {
+        body = null;
+      }
+      const upstream = body && typeof body === 'object' ? body.upstream : null;
+      if (upstream && upstream.ok === false) {
+        return {
+          ok: false,
+          kind: 'upstream',
+          detail: String(upstream.detail || 'upstream not reachable'),
+        };
+      }
+      return { ok: true, kind: 'ok', detail: 'ok' };
+    } catch (err) {
+      const kind = gate.timedOut ? 'timeout' : classifyError(err).kind;
+      return { ok: false, kind: 'endpoint', detail: errorInfo(kind).message };
+    } finally {
+      gate.cleanup();
+    }
+  }
+
+  /**
    * SPEC §3.9b/§3.10 · 多模态通道：走 visionBaseUrl 的 OpenAI 兼容 `/chat/completions`。
    *
    * 为什么单独一条通道而不是复用 ask()：ask() 面对的是决策模型（Laya/JEv），它的
@@ -428,6 +489,7 @@ export function makeApi({ config, fetchImpl = globalThis.fetch } = {}) {
     ask,
     askBatch,
     health,
+    diagnoseDecisionEndpoint,
     vision,
     visionConfigured: visionEndpointConfigured,
     visionEndpointConfigured,

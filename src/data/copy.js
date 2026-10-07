@@ -73,6 +73,22 @@ export const ERRORS = {
     retryable: false,
     silent: false,
   },
+  // SPEC §5.5 · 决策端点活着、但它背后的上游（本机 Laya）挂了。
+  // 单独一档的理由：这种情形对端**仍然返回 HTTP 200**，只是 body 里 upstream.ok=false。
+  // 不单独报的话，用户看到的是整轮失败 + 一堆看不懂的 network/server 文案，
+  // 根本不知道真正该做的是"把 Laya 起起来"（实测踩过）。
+  upstream_unreachable: {
+    message: '决策模型服务没在运行（或刚退出）。请先启动它，再重新分析',
+    action: '看启动说明',
+    retryable: false,
+    silent: false,
+  },
+  decision_endpoint_unreachable: {
+    message: '连不上决策模型地址。请检查地址是否正确、以及服务是否已启动',
+    action: '去设置页',
+    retryable: false,
+    silent: false,
+  },
   invalid_input: {
     message: '无法识别有效穿搭内容，请上传清晰的穿搭照片哦',
     action: '换图',

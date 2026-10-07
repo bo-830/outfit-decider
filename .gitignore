@@ -50,3 +50,6 @@ Expo-Go-*.apk
 
 # LAN IP remembered by tools/start-outfit-decider.bat for change detection
 .last-lan-ip.txt
+
+# runtime state from tools/start-outfit-decider.bat (PIDs + service logs)
+.run/

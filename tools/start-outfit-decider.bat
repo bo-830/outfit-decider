@@ -47,6 +47,8 @@ REM itself, so moving or copying it would break the venv lookup).
 set "LAYA_DIR=%PARENT%\laya-service"
 set "ADAPTER_PORT=8787"
 set "LAYA_PORT=8000"
+REM  Runtime state: PIDs + service logs. Gitignored; safe to delete.
+set "RUNDIR=%PROJECT%\.run"
 REM Metro / Expo dev server. Expo Go on the phone also needs this port open,
 REM otherwise the app itself loads but the JS bundle cannot be fetched.
 set "EXPO_PORT=8081"
@@ -65,6 +67,11 @@ echo   outfit-decider : one-click start
 echo ================================================================
 echo   project : %PROJECT%
 echo.
+
+REM ---------- "stop" subcommand ----------
+REM  Shuts down whatever this script started, by PID then by port.
+REM  Usage:  start-outfit-decider.bat stop
+if /i "%~1"=="stop" goto :do_stop
 
 if not exist "%LAYA_DIR%\start-laya.cmd" (
   echo [FATAL] not found: %LAYA_DIR%\start-laya.cmd
@@ -110,11 +117,18 @@ for %%P in (%LAYA_PORT% %ADAPTER_PORT% %EXPO_PORT%) do (
 )
 
 REM ---------- step 2: start laya-serve ----------
-echo [2/6] starting laya-serve on 0.0.0.0:%LAYA_PORT% (new window) ...
+REM ---------- step 2: start laya-serve ----------
+REM  laya-serve is a console app; its own start-laya.cmd already redirects to
+REM  laya-serve.log. We launch it detached (hidden, no /k) so that closing any
+REM  window - including this one - does NOT kill it. That "services quietly died
+REM  because their window was closed" failure happened twice before.
+echo [2/6] starting laya-serve on 0.0.0.0:%LAYA_PORT% (detached) ...
 powershell -NoProfile -Command ^
   "if (Get-NetTCPConnection -LocalPort %LAYA_PORT% -State Listen -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }" >nul 2>&1
 if errorlevel 1 (
-  start "laya-serve :%LAYA_PORT%" cmd /k "\"%LAYA_DIR%\start-laya.cmd\""
+  powershell -NoProfile -Command ^
+    "Start-Process -FilePath 'cmd.exe' -ArgumentList '/c','\"%LAYA_DIR%\start-laya.cmd\"' -WindowStyle Hidden"
+  echo       launched; log: %LAYA_DIR%\laya-serve.log
 ) else (
   echo       port %LAYA_PORT% already in use - assuming laya-serve is running
 )
@@ -144,22 +158,35 @@ if "!READY!"=="0" (
 )
 
 REM ---------- step 4: start adapter ----------
-echo [4/6] starting laya-adapter on 0.0.0.0:%ADAPTER_PORT% (new window) ...
+REM  Detached (hidden) + PID recorded, so it survives this console window
+REM  closing, and "stop" can shut it down deterministically.
+REM  Stdout/err go to .run\adapter.log so "why did it die" is answerable later.
+echo [4/6] starting laya-adapter on 0.0.0.0:%ADAPTER_PORT% (detached) ...
 powershell -NoProfile -Command ^
   "if (Get-NetTCPConnection -LocalPort %ADAPTER_PORT% -State Listen -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }" >nul 2>&1
 if errorlevel 1 (
-  start "laya-adapter :%ADAPTER_PORT%" cmd /k "cd /d \"%PROJECT%\" && node tools\laya-adapter.mjs"
+  if not exist "%RUNDIR%" mkdir "%RUNDIR%" >nul 2>&1
+  powershell -NoProfile -Command ^
+    "$p = Start-Process -FilePath 'node' -ArgumentList 'tools/laya-adapter.mjs' -WorkingDirectory '%PROJECT%' -WindowStyle Hidden -RedirectStandardOutput '%RUNDIR%\adapter.log' -RedirectStandardError '%RUNDIR%\adapter.err.log' -PassThru; $p.Id | Out-File -Encoding ascii '%RUNDIR%\adapter.pid'"
+  echo       launched; log: %RUNDIR%\adapter.log
 ) else (
   echo       port %ADAPTER_PORT% already in use - assuming adapter is running
 )
 ping -n 4 127.0.0.1 >nul
 
 REM ---------- step 4b: start Expo / Metro ----------
-echo [4b/6] starting Expo (Metro) on :%EXPO_PORT% (new window) ...
+REM  Deliberately keeps a VISIBLE window: Metro is the one service you interact
+REM  with (QR code, 'r' to reload, 'j' for the debugger). It still records its
+REM  PID so "stop" can shut it down along with the others.
+echo [4b/6] starting Expo (Metro) on :%EXPO_PORT% (own window, keeps QR + keys) ...
 powershell -NoProfile -Command ^
   "if (Get-NetTCPConnection -LocalPort %EXPO_PORT% -State Listen -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }" >nul 2>&1
 if errorlevel 1 (
+  if not exist "%RUNDIR%" mkdir "%RUNDIR%" >nul 2>&1
   start "expo :%EXPO_PORT%" cmd /k "cd /d \"%PROJECT%\" && npx expo start --lan"
+  ping -n 4 127.0.0.1 >nul
+  powershell -NoProfile -Command ^
+    "$c = Get-NetTCPConnection -LocalPort %EXPO_PORT% -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; if ($c) { $c.OwningProcess | Out-File -Encoding ascii '%RUNDIR%\metro.pid' }"
 ) else (
   echo       port %EXPO_PORT% already in use - assuming Expo is running
 )
@@ -406,9 +433,56 @@ echo.
 
 start "" "http://%LANIP%:%ADAPTER_PORT%/health"
 
-echo This window can stay open, or close it - the two services
-echo run in their own windows. To stop them, close those windows
-echo or run:  taskkill /F /IM laya-serve.exe  and  taskkill /F /IM node.exe
+echo Services run detached (no /k console windows), with stdout/err captured to
+echo .run\*.log - so if something dies you can read why instead of guessing.
+echo.
+echo They are ordinary processes, NOT a Windows service. Under normal
+echo double-click use they outlive this window; but a session logout or a
+echo forced process-tree kill WILL take them down (measured). That is why this
+echo script is IDEMPOTENT: if the app starts failing, just run it again - it
+echo only starts what is missing.
+echo To stop everything:  "%~nx0" stop
 echo.
 pause
 endlocal
+exit /b 0
+
+REM ================================================================
+REM  stop : shut down the services this script starts
+REM ================================================================
+:do_stop
+echo Stopping outfit-decider services ...
+REM  Stop by PID when we have it, and by port as a backstop (a stale PID file
+REM  or a service started by hand would otherwise be left behind).
+REM  Stopping BY PORT is deliberate: it targets exactly the processes holding
+REM  8000/8787/8081 instead of taskkill /IM node.exe, which would also kill
+REM  unrelated Node processes the user may be running.
+for %%F in (adapter metro) do (
+  if exist "%RUNDIR%\%%F.pid" (
+    set "PIDFILE=%RUNDIR%\%%F.pid"
+    set "THEPID="
+    for /f "usebackq delims=" %%P in ("!PIDFILE!") do set "THEPID=%%P"
+    set "THEPID=!THEPID: =!"
+    if not "!THEPID!"=="" (
+      taskkill /PID !THEPID! /T /F >nul 2>&1
+      if not errorlevel 1 echo       stopped %%F pid !THEPID!
+    )
+    del "!PIDFILE!" >nul 2>&1
+  )
+)
+powershell -NoProfile -Command ^
+  "foreach ($port in %LAYA_PORT%,%ADAPTER_PORT%,%EXPO_PORT%) {" ^
+  "  $conns = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue;" ^
+  "  foreach ($c in $conns) { try { Stop-Process -Id $c.OwningProcess -Force -ErrorAction Stop; Write-Host ('      stopped port ' + $port + ' (pid ' + $c.OwningProcess + ')') } catch {} }" ^
+  "}"
+echo.
+echo Remaining listeners:
+powershell -NoProfile -Command ^
+  "foreach ($port in %LAYA_PORT%,%ADAPTER_PORT%,%EXPO_PORT%) {" ^
+  "  $n = (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Measure-Object).Count;" ^
+  "  Write-Host ('      port ' + $port + ' : ' + $n)" ^
+  "}"
+echo.
+pause
+endlocal
+exit /b 0

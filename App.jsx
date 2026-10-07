@@ -17,7 +17,7 @@ import { buildScoreQuestions } from './src/core/prompts.js';
 import { rankLooks } from './src/core/scoring.js';
 import { stateSummary, validateInput } from './src/core/state.js';
 import { LOOK_IDS } from './src/data/options.js';
-import { invalidInputError } from './src/data/copy.js';
+import { errorFor, invalidInputError } from './src/data/copy.js';
 import { classifyError, DEFAULT_CONFIG, makeApi, normalizeBaseUrl } from './src/engine/api.js';
 import { makeOrchestrator } from './src/engine/orchestrator.js';
 import { appendHistory, clearHistory, loadHistory, makeHistoryRecord, removeHistory } from './src/store/history.js';
@@ -264,6 +264,31 @@ export default function App() {
   );
 
   /* ── System One ───────────────────────────────────────── */
+
+  /**
+   * SPEC §5.5 · 打分前先确认决策端点真的能干活。
+   *
+   * 为什么值得多一次很轻的 GET：本机适配器在上游（Laya）挂掉时**照样返回 HTTP 200**，
+   * 只是 body 里 upstream.ok=false。不先探一下的话，用户要等一整轮失败、再看一堆
+   * network/server 文案，才知道真正的动作是"把 Laya 起起来"（实测就这么踩过）。
+   *
+   * 返回 null = 可以继续；返回错误对象 = 应当中止并提示。
+   * 探测本身抛错也不阻断流程：那是"探测失败"，不是"打分一定失败"。
+   */
+  const guardDecisionEndpoint = useCallback(async () => {
+    if (typeof api.diagnoseDecisionEndpoint !== 'function') return null;
+    try {
+      const d = await api.diagnoseDecisionEndpoint();
+      if (d && d.ok === false) {
+        const kind = d.kind === 'upstream' ? 'upstream_unreachable' : 'decision_endpoint_unreachable';
+        return errorFor(kind);
+      }
+    } catch {
+      /* 探测失败不阻断 */
+    }
+    return null;
+  }, [api]);
+
   /** @param opts.thenDeep 跑完 System One 后接着跑 System Two（"两个都要"）。 */
   const startQuick = useCallback(async (opts = {}) => {
     const current = flowRef.current;
@@ -273,6 +298,13 @@ export default function App() {
       question: current.question,
     });
     if (!check.canRunQuick) return;
+
+    const blocked = await guardDecisionEndpoint();
+    if (blocked) {
+      setErrors((prev) => [...prev.slice(-4), blocked.message]);
+      dispatch({ type: 'SET_ERROR', error: blocked });
+      return;
+    }
 
     setTab('result');
     setExpandedLookId(null);
@@ -356,7 +388,7 @@ export default function App() {
       abortRef.current = null;
       setProgress(null);
     }
-  }, [orchestrator, pushHistory]);
+  }, [guardDecisionEndpoint, orchestrator, pushHistory]);
 
   /* ── System Two ───────────────────────────────────────── */
   const startDeep = useCallback(
@@ -369,6 +401,14 @@ export default function App() {
       }
       if (current.phase === 'deep_running') return;
       if (!current.artifacts.length) return;
+
+      // SPEC §5.5：深度分析同样先确认决策端点真能干活（它整轮都依赖多模态通道）
+      const blocked = await guardDecisionEndpoint();
+      if (blocked) {
+        setErrors((prev) => [...prev.slice(-4), blocked.message]);
+        dispatch({ type: 'SET_ERROR', error: blocked });
+        return;
+      }
 
       setExpandedLookId(lookId);
       setDeepBusyLook(lookId);
@@ -413,7 +453,7 @@ export default function App() {
         setProgress(null);
       }
     },
-    [orchestrator, saveDeepSummary],
+    [guardDecisionEndpoint, orchestrator, saveDeepSummary],
   );
   // 每轮渲染后把最新的 startDeep 转发给 ref，供 startQuick 的"两个都要"调用
   startDeepRef.current = startDeep;
