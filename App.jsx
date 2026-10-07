@@ -42,6 +42,9 @@ const PERSISTED_CONFIG_KEYS = [
   'visionServerSide',
   // 用户显式绕过"视觉先行"闸门（视觉端点出问题时的自救路径）
   'decisionUnlocked',
+  // v1.7 SPEC §3.10b：上游协议（auto/jev/generic）。直连 JEv 的用户填的地址与协议
+  // 必须持久化，否则每次重启都退回 auto 并可能把请求发成错误的形状。
+  'protocol',
 ];
 
 /**

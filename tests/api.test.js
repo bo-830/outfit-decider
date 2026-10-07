@@ -34,6 +34,8 @@ test('DEFAULT_CONFIG 与 SPEC §3.10 逐字一致', () => {
     askPath: '/ask',
     healthPath: '/health',
     model: 'outfit-judge-v1',
+    // SPEC §3.10b：上游协议（auto = 按主机名判断；直连 typesafe.ai 时自动用 JEv 原生协议）
+    protocol: 'auto',
     apiKey: '',
     timeoutMs: 120000,
     quickTimeoutMs: 20000,

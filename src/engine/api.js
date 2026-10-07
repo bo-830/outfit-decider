@@ -6,6 +6,7 @@
 // 其余（describe_* / 6 个 score 维度）→ System One，用 quickTimeoutMs；显式传 timeoutMs 优先。
 
 import { buildRequest } from '../core/protocol.js';
+import { JEV_ASK_PATH, fromJevAnswers, resolveJevModel, resolveProtocol, toJevRequest } from '../core/jev.js';
 import { ERRORS, ERROR_KINDS, errorFor, errorInfo } from '../data/copy.js';
 
 /** SPEC §5.1「重试」列的全局上限：可重试错误自动重投 1 次（退避默认 600ms，rate_limit 用文案里的 2s）。 */
@@ -37,6 +38,14 @@ export const DEFAULT_CONFIG = {
   askPath: '/ask',
   healthPath: '/health',
   model: 'outfit-judge-v1',
+  /**
+   * SPEC §3.10b · 上游协议。
+   *   'auto'    —— 按 baseUrl 主机名判断（api.typesafe.ai → jev），默认值
+   *   'jev'     —— 强制 TypeSafe JEv 原生协议（questions 用 map、model 用 jev-latest）
+   *   'generic' —— 强制 App 原生数组协议（本机适配器 / 自建对端）
+   * 直连 JEv 时必须走 jev，否则数组式 questions 会被对端拒绝。
+   */
+  protocol: 'auto',
   apiKey: '',
   // 深度分析走 decision 通道（visionServerSide 形态），所以这条超时必须够长：
   // 实测 15–37s，且 reasoning 预算提高后偏慢的一侧更常见。
@@ -122,17 +131,49 @@ export function makeApi({ config, fetchImpl = globalThis.fetch } = {}) {
 
     const { state, questions, images, timeoutMs, signal, model } = request;
     const requestModel = typeof model === 'string' && model ? model : cfg.model;
-    const body = buildRequest({ model: requestModel, state: state ?? '', questions });
-    const imageList = normalizeImages(images);
-    if (imageList.length) body.images = imageList;
+
+    /**
+     * SPEC §3.10b · 直连 TypeSafe JEv 时用它的原生协议。
+     *
+     * 为什么不"只填个地址就行"：App 侧发的是 `questions` **数组**，
+     * 而 JEv 文档要求 **map**（id → {type,instructions,criteria}）—— 形状不同，必须转换。
+     * 经本机适配器时由适配器转；直连时由这里转（共用 src/core/jev.js 的同一套定义）。
+     */
+    const protocol = resolveProtocol(base, cfg.protocol);
+    const isJev = protocol === 'jev';
+    /**
+     * 模型名：直连 JEv 时把"已知的非 JEv 名字"（本机 laya / 通用默认占位）换成官方别名
+     * jev-latest —— 老版本把 `model` 持久化过，切过来会把旧名字一直带过去，必然 400。
+     * 用户自己填的其它名字一律尊重，不猜。
+     */
+    const effectiveModel = isJev && !model
+      ? resolveJevModel(cfg.model)
+      : requestModel;
+    const body = isJev
+      ? toJevRequest({ state: state ?? '', model: effectiveModel, questions })
+      : buildRequest({ model: effectiveModel, state: state ?? '', questions });
+    // JEv 不做文本生成、也不接受图片：带上 images 只会让对端困惑（§3.9b 已在上层拦住）
+    if (!isJev) {
+      const imageList = normalizeImages(images);
+      if (imageList.length) body.images = imageList;
+    }
 
     const headers = { 'Content-Type': 'application/json' };
-    if (cfg.mode === 'jev') {
+    // JEv 必须带 Bearer Key；generic 沿用原口径（mode==='jev' 时带上配置的 Key）
+    if (isJev || cfg.mode === 'jev') {
       const key = typeof cfg.apiKey === 'string' ? cfg.apiKey.trim() : '';
       if (key) headers.Authorization = `Bearer ${key}`;
     }
 
-    const url = `${base}${normalizePath(cfg.askPath, DEFAULT_CONFIG.askPath)}`;
+    /**
+     * 端点路径：用户**显式改过** askPath 就以他为准；仍是默认值时才按协议取默认
+     * （JEv → /systemone，generic → /ask）。否则直连 JEv 会打到 /ask 上（实测踩过）。
+     */
+    const askPathCustomized = typeof cfg.askPath === 'string'
+      && cfg.askPath.trim()
+      && cfg.askPath.trim() !== DEFAULT_CONFIG.askPath;
+    const defaultAsk = isJev ? JEV_ASK_PATH : DEFAULT_CONFIG.askPath;
+    const url = `${base}${normalizePath(askPathCustomized ? cfg.askPath : defaultAsk, defaultAsk)}`;
     const gate = createAbortGate(signal, pickTimeout(timeoutMs, questions, cfg));
 
     try {
@@ -170,12 +211,22 @@ export function makeApi({ config, fetchImpl = globalThis.fetch } = {}) {
       } catch {
         throw gate.timedOut ? apiError('timeout') : apiError('parse');
       }
-      if (!data || typeof data !== 'object' || Array.isArray(data) || !Array.isArray(data.answers)) {
-        throw apiError('parse');
-      }
+      if (!data || typeof data !== 'object' || Array.isArray(data)) throw apiError('parse');
+
+      /**
+       * JEv 的 `answers` 是 **map**（文档：每个 question id 一个答案），
+       * 而 App 全链路用的是数组。这里把 map 归一化成数组，
+       * 让上层（scoreSystem / deepSystem / reviewSystem）完全不必知道对端是谁。
+       */
+      const answers = isJev
+        ? fromJevAnswers(data.answers)
+        : data.answers;
+      if (!Array.isArray(answers)) throw apiError('parse');
+      // JEv 若返回空 answers，说明一个问题都没被回答 —— 明确报 parse 而不是"成功但没分"
+      if (isJev && !answers.length) throw apiError('parse');
       return {
         model: typeof data.model === 'string' && data.model ? data.model : requestModel,
-        answers: data.answers,
+        answers,
         usage: normalizeUsage(data.usage),
       };
     } finally {
@@ -191,20 +242,33 @@ export function makeApi({ config, fetchImpl = globalThis.fetch } = {}) {
     if (!doFetch || !base) {
       return { ok: false, ms: 0, detail: errorInfo('network').message };
     }
-    const url = `${base}${normalizePath(cfg.healthPath, DEFAULT_CONFIG.healthPath)}`;
+    const isJev = resolveProtocol(base, cfg.protocol) === 'jev';
+    /**
+     * JEv 没有公开的 health 端点（文档只有 POST /v1/systemone）。
+     * 所以退一步：探 systemone 端点，并把 **401/403 视为"可达且服务活着"**。
+     * 没带 Key 时把鉴权需求报成"服务挂了"是假警报 —— 直连用户本来就可能在配好 Key 前先探一次。
+     */
+    const url = isJev
+      ? `${base}${JEV_ASK_PATH}`
+      : `${base}${normalizePath(cfg.healthPath, DEFAULT_CONFIG.healthPath)}`;
     const gate = createAbortGate(request.signal, pickTimeout(request.timeoutMs, null, {
       ...cfg,
       quickTimeoutMs: HEALTH_TIMEOUT_MS,
       timeoutMs: HEALTH_TIMEOUT_MS,
     }));
     try {
-      const response = await doFetch(url, { method: 'GET', signal: gate.signal });
+      const response = await doFetch(url, { method: isJev ? 'POST' : 'GET', signal: gate.signal });
       const ms = Date.now() - started;
       const status = Number(response && response.status);
-      const ok = response && typeof response.ok === 'boolean'
+      const httpOk = response && typeof response.ok === 'boolean'
         ? response.ok
         : Number.isFinite(status) && status >= 200 && status < 300;
-      return { ok: !!ok, ms, detail: Number.isFinite(status) ? `HTTP ${status}` : 'HTTP ?' };
+      const authRequired = isJev && (status === 401 || status === 403);
+      const ok = !!httpOk || authRequired;
+      const detail = authRequired
+        ? `HTTP ${status}（可达，需要 API Key）`
+        : (Number.isFinite(status) ? `HTTP ${status}` : 'HTTP ?');
+      return { ok, ms, detail, authRequired: authRequired || undefined };
     } catch (err) {
       const ms = Date.now() - started;
       const kind = gate.timedOut ? 'timeout' : classifyError(err).kind;
@@ -236,22 +300,38 @@ export function makeApi({ config, fetchImpl = globalThis.fetch } = {}) {
     if (!doFetch || !base) {
       return { ok: false, kind: 'endpoint', detail: 'baseUrl 未配置' };
     }
-    const url = `${base}${normalizePath(cfg.healthPath, DEFAULT_CONFIG.healthPath)}`;
+    const isJev = resolveProtocol(base, cfg.protocol) === 'jev';
+    const url = isJev
+      ? `${base}${JEV_ASK_PATH}`
+      : `${base}${normalizePath(cfg.healthPath, DEFAULT_CONFIG.healthPath)}`;
     const gate = createAbortGate(request.signal, pickTimeout(request.timeoutMs, null, {
       ...cfg,
       quickTimeoutMs: HEALTH_TIMEOUT_MS,
       timeoutMs: HEALTH_TIMEOUT_MS,
     }));
     try {
-      const response = await doFetch(url, { method: 'GET', signal: gate.signal });
+      const response = await doFetch(url, { method: isJev ? 'POST' : 'GET', signal: gate.signal });
       const status = Number(response && response.status);
       const httpOk = response && typeof response.ok === 'boolean'
         ? response.ok
         : Number.isFinite(status) && status >= 200 && status < 300;
+      /**
+       * JEv 没有 Key 时返回 401/403 —— 那证明**主机可达、端点正确**，
+       * 只差一个 Key。把它当成"连不上"会误报（实测：用户在设置页刚点完预设、
+       * 还没保存 Key 时，整条打分链会被前置检查直接拦掉，而且文案指向错误的排查方向）。
+       */
+      if (isJev && (status === 401 || status === 403)) {
+        return {
+          ok: true,
+          kind: 'ok',
+          detail: `HTTP ${status}（端点可达，需要 API Key）`,
+          authRequired: true,
+        };
+      }
       if (!httpOk) {
         return { ok: false, kind: 'endpoint', detail: `HTTP ${Number.isFinite(status) ? status : '?'}` };
       }
-      // 读 body 只为看 upstream；读不出来（空体/非 JSON）不影响"端点是活的"这个结论
+      // 读 body 只为看 upstream（本机适配器会明说上游挂了）；读不出来不影响"端点是活的"
       let body = null;
       try {
         if (response && typeof response.json === 'function') body = await response.json();
@@ -490,6 +570,16 @@ export function makeApi({ config, fetchImpl = globalThis.fetch } = {}) {
     return !!normalizeBaseUrl(settings().baseUrl);
   }
 
+  /**
+   * 当前决策端点是不是**直连 TypeSafe JEv**（§3.10b）。
+   * vision.js 用它判断"能不能指望决策端点产出文字描述"：JEv 不做文本生成，
+   * 所以直连且没有视觉端点时必须明确报 vision_unconfigured，而不是静默降级。
+   */
+  function isJevDirect() {
+    const cfg = settings();
+    return resolveProtocol(normalizeBaseUrl(cfg.baseUrl), cfg.protocol) === 'jev';
+  }
+
   return {
     ask,
     askBatch,
@@ -500,6 +590,7 @@ export function makeApi({ config, fetchImpl = globalThis.fetch } = {}) {
     visionEndpointConfigured,
     visionReady,
     decisionConfigured,
+    isJevDirect,
   };
 }
 

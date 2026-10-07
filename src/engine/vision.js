@@ -13,7 +13,7 @@
 
 import { buildDescribeQuestions, DESCRIBE_SYSTEM_PROMPT, DESCRIPTION_DIMENSIONS } from '../core/prompts.js';
 import { toDataUri } from '../core/protocol.js';
-import { invalidInputError, UNRECOGNIZABLE_MARK } from '../data/copy.js';
+import { errorFor, invalidInputError, UNRECOGNIZABLE_MARK } from '../data/copy.js';
 
 /** §3.7 要求"state 传空描述占位"：给一个非空的中性占位串，避免对端把空串判成缺字段。 */
 const DESCRIBE_STATE_PLACEHOLDER = '（本次只做图片客观描述，无用户上下文）';
@@ -51,6 +51,17 @@ export function makeVisionEngine({ api, model } = {}) {
     if (!api) throw invalidInputError();
     const cached = typeof knownText === 'string' ? knownText.trim() : '';
     if (cached) return { lookId, text: cached };
+    if (!hasVisionChannel() && isTextGeneratingDecisionEndpoint(api)) {
+      /**
+       * SPEC §3.9b/§3.10b：直连 TypeSafe JEv 时**没有**图片转文字的通道。
+       * JEv 文档写明 "No text generation"，只答 choice/score/noul，所以它永远
+       * 产不出那份 7 行描述 —— 而打分依赖描述。
+       *
+       * 不拦的话会**静默降级**：describe 被当成 score 问题发过去、拿到一个分数当描述，
+       * 最终整轮 0 分且看不出原因（实测就是这样）。所以这里明确失败并指向设置页。
+       */
+      throw errorFor('vision_unconfigured');
+    }
     const text = hasVisionChannel()
       ? await describeViaVision({ api, artifact, lookId, signal })
       : await describeViaDecision({ api, artifact, lookId, model, signal });
@@ -59,6 +70,15 @@ export function makeVisionEngine({ api, model } = {}) {
   }
 
   return { describeLook, hasVisionChannel };
+}
+
+/**
+ * 决策端点是不是"只会做结构化判断、不会生成文本"的那类（目前就是 JEv）。
+ * 有 `isJevDirect` 就问它；没有就退回 false（保持旧对端的行为不变）。
+ */
+function isTextGeneratingDecisionEndpoint(api) {
+  if (typeof api.isJevDirect === 'function') return api.isJevDirect();
+  return false;
 }
 
 /** 通道 A：多模态端点直接看原图 → 结构化描述。 */

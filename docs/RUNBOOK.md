@@ -182,7 +182,36 @@ tools\start-outfit-decider.bat stop     # 收工（按 PID + 端口精确停，�
 
 ## 2. 接你自己的决策模型
 
-### 2.0 切到 TypeSafe JEv（一条命令）
+### 2.00 App **直连** TypeSafe JEv（没有电脑也能用）
+
+设置页有一键预设：点 **「直连 TypeSafe JEv（无需电脑）」**，它会填好四项：
+
+```
+baseUrl  = https://api.typesafe.ai/v1
+askPath  = /systemone
+model    = jev-latest
+protocol = jev
+```
+
+你只需再填自己的 API Key（https://console.typesafe.ai/keys）并点「保存 Key」。
+也可以走 `tools\use-jev.bat` 经本机适配器中转（见 §2.0），两者不冲突。
+
+**App 会自动做的翻译**（所以你不必管形状）：App 发的是 `questions` 数组，
+而 JEv 要的是 map（`id → {type,instructions,criteria}`）；命中 `typesafe.ai` 时
+由 `src/core/jev.js` 转换，并把响应的 map `answers` 归一化回数组。
+6 档 criteria 正好对应 0–5，**无需档位映射**（本机 Laya 的 3 档才需要）。
+
+⚠️ **直连 JEv 必须另配一个能看图的模型。**
+JEv 文档写明 **"No text generation"** —— 它只答 choice/score/noul，
+做不了「图片 → 7 行描述」这一步，而打分依赖描述。
+所以直连 JEv 且未配视觉模型时，App 会明确报「还没配置能看照片的模型…」，
+而不是硬跑出 0 分。配置方式：设置页「能看图的模型」填一个 OpenAI 兼容的多模态端点
+（如 `https://api.deepseek.com/v1` + `deepseek-flash` + 你的 Key）。
+
+⚠️ **web 预览下直连会被 CORS 拦**（浏览器限制）。手机上 RN 的 fetch 不执行 CORS，
+所以移动端正常、web 预览受限；web 上验证请走本机适配器（§2.0）。
+
+### 2.0 切到 TypeSafe JEv（经本机适配器，一条命令）
 
 ```powershell
 tools\use-jev.bat          # 切到 JEv

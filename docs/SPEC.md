@@ -475,6 +475,34 @@ export function makeOrchestrator({ api, model, concurrency = 4 })   // → Orche
 
 切换与配置见 `tools/use-jev.bat`；Key 只写在本机 `.env.local`，**绝不下发到手机**。
 
+### 3.10b App **直连** JEv（v1.7 新增，给没有电脑的用户）
+
+适配器要一台电脑常驻，多数用户做不到。所以允许 App 自己直连 JEv：
+
+- `DEFAULT_CONFIG.protocol`（`'auto' | 'jev' | 'generic'`）：`auto` 按 baseUrl 主机名判断
+  （`api.typesafe.ai` → `jev`）。纯逻辑集中在 `src/core/jev.js`（禁 react/react-native，可单测）。
+- 命中 JEv 时 `api` 层自动完成四件事：`questions` 数组 → **map**、补 `model=jev-latest`、
+  打 `/v1/systemone`、带 `Bearer`，并把响应的 map `answers` **归一化成数组**——
+  上层（scoreSystem / deepSystem / reviewSystem）完全不必知道对端是谁。
+- 端点路径与模型名**只在用户没改过默认值时**按协议取值；用户显式改过就以他为准。
+- `resolveJevModel()`：把**已知的非 JEv 名字**（`laya` / `outfit-judge-v1`）换成 `jev-latest`。
+  理由：老版本持久化过 `model`，切到直连会被一直带过去 → 必然 400；用户自填的其它名字尊重。
+- health 与 `diagnoseDecisionEndpoint`：JEv 的 **401/403 视为可达**（`authRequired`）。
+  否则用户刚点完预设、还没保存 Key 时，整条打分链会被前置检查错误地拦掉，且文案指向错误方向。
+- 设置页一键预设（`btn-preset-jev`）填好 baseUrl/askPath/healthPath/model/protocol，
+  用户只需再填自己的 Key。`protocol` 已进 `PERSISTED_CONFIG_KEYS`。
+
+**硬约束：必须显式失败，不许静默降级。**
+JEv **不做文本生成**（文档原话 "No text generation"），只答 choice/score/noul；
+而 System One 的第一步「图片 → 7 行描述」需要文本生成。
+所以**直连 JEv 必须另配一个能看图的模型**；否则 `describeLook` 明确抛
+`vision_unconfigured`（由 `api.isJevDirect()` 判定），
+而不是把 describe 当 score 问题发过去、拿个分数当描述、最后整轮 0 分还看不出原因（实测踩过）。
+
+**web 预览的限制**：浏览器直连 `api.typesafe.ai` 会被 CORS 拦。App 是移动端
+（RN 的 fetch 不执行 CORS），所以这是 web 预览的固有限制、不是缺陷；
+web 上验证请走本机适配器（§3.11）。
+
 ### 3.11b 批处理打分（v1.6 新增）
 
 **动机**：`scoreSystem` 原本对每套发一次 `/ask`（4 套 = 4 次往返）。Laya 的

@@ -29,6 +29,24 @@ const ENGINE_MODE_ROWS = {
 const DEFAULT_ENGINE_MODE = 'laya_review';
 
 /**
+ * SPEC §3.10b · 直连 TypeSafe JEv 的四个值。
+ *
+ * 依据官方文档（https://docs.typesafe.ai）：端点是 `/v1/systemone`，
+ * 模型别名 `jev-latest`，`questions` 必须是 map（由 src/core/jev.js 负责转换）。
+ * 一次填好这四项，用户只需再填自己的 API Key —— 没有电脑、跑不了本机适配器的用户
+ * 也能用，这是这个预设存在的唯一理由。
+ */
+export function jevPreset() {
+  return {
+    baseUrl: 'https://api.typesafe.ai/v1',
+    askPath: '/systemone',
+    healthPath: '/systemone',
+    model: 'jev-latest',
+    protocol: 'jev',
+  };
+}
+
+/**
  * 锁定态必须是**真的不可操作**，而不是只把颜色调灰：
  *   - `accessibilityState={{ disabled: true }}` 是 SPEC 要求，RN 原生与 RN-web 都认；
  *   - `editable={false}` → web 渲染 `readonly`，原生同步 disabled；
@@ -453,6 +471,30 @@ export default function SettingsScreen({
 
         <View style={styles.block}>
           <SectionLabel title="决策模型地址" meta="本机 / 局域网都行" dim={decisionLocked} />
+          {/* SPEC §3.10b · 一键切到直连 TypeSafe JEv。
+              没有电脑的用户跑不了本机适配器，只能让 App 自己直连云端；
+              四个值（地址/路径/模型/协议）手填容易错，所以给一个预设。 */}
+          <View style={styles.padX}>
+            <Pressable
+              testID="btn-preset-jev"
+              accessibilityRole="button"
+              accessibilityState={{ disabled: decisionLocked }}
+              disabled={decisionLocked}
+              onPress={() => patch(jevPreset())}
+              style={({ pressed }) => [
+                styles.preset,
+                decisionLocked && styles.presetLocked,
+                pressed && styles.pressed,
+              ]}
+            >
+              <Text style={[styles.presetTitle, decisionLocked && styles.presetTitleLocked]}>
+                直连 TypeSafe JEv（无需电脑）
+              </Text>
+              <Text style={styles.presetSub}>
+                把地址/路径/模型/协议一次填好；需要你自己的 API Key，并在下面保存
+              </Text>
+            </Pressable>
+          </View>
           <Field
             label="baseUrl"
             testID="engine-baseurl"
@@ -819,6 +861,22 @@ const styles = StyleSheet.create({
   secondaryLocked: { borderColor: colors.border, backgroundColor: colors.surfaceAlt },
   secondaryTextLocked: { color: colors.textDim },
   pressed: { opacity: 0.75 },
+  // 直连 JEv 预设：跟随已选中/未选中卡片的同一套观感，只做一层描边按钮
+  preset: {
+    minHeight: HIT,
+    justifyContent: 'center',
+    paddingVertical: space.sm,
+    paddingHorizontal: space.md,
+    marginBottom: space.sm,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  presetLocked: { backgroundColor: colors.surfaceAlt },
+  presetTitle: { fontFamily: SANS, fontSize: font.body, fontWeight: '600', color: colors.text },
+  presetTitleLocked: { color: colors.textDim },
+  presetSub: { fontFamily: SANS, fontSize: font.small, lineHeight: 18, color: colors.textDim, marginTop: 2 },
   disabled: { opacity: 0.5 },
   note: { fontFamily: SANS, fontSize: font.tiny + 0.5, lineHeight: 17, color: colors.textDim, marginTop: space.sm },
   connBox: { marginTop: space.sm, minHeight: 44, justifyContent: 'center' },
