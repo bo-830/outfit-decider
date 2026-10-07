@@ -59,6 +59,19 @@ export const ERRORS = {
     retryable: true,
     silent: false,
   },
+  /**
+   * SPEC §5.4b · 对端明确拒绝了请求（4xx，非 401/429）。
+   *
+   * 单独一档的理由：以前这类全部落进 `server`，于是 Key 错、模型名不存在、路径写错
+   * 都会显示「决策模型服务出错了，请稍后再试」——指向排查方向完全错误，用户去查服务日志也白搭。
+   * 4xx 是"我们的请求不对"，重试没有意义，必须明说。
+   */
+  endpoint_rejected: {
+    message: '对端拒绝了这次请求（多为地址、模型名或参数不对）。请检查设置页的地址与模型名',
+    action: '去看设置',
+    retryable: false,
+    silent: false,
+  },
   parse: {
     message: '模型返回的内容看不懂，请重试一次',
     action: '重试',

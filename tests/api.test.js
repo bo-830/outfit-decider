@@ -84,7 +84,9 @@ test('classifyError：§5.1 分类表逐条命中，且只返回四个字段', (
     [{ status: 429 }, 'rate_limit'],
     [{ status: 500 }, 'server'],
     [{ status: 503 }, 'server'],
-    [{ statusCode: 404 }, 'server'],
+    // v1.7 §5.4b：其余 4xx 是"我们的请求不对"，不再混进 server（那会把用户引向错误方向）
+    [{ statusCode: 404 }, 'endpoint_rejected'],
+    [{ status: 400 }, 'endpoint_rejected'],
     [Object.assign(new TypeError('fetch failed'), {}), 'network'],
     [Object.assign(new Error('connect fail'), { code: 'ECONNREFUSED' }), 'network'],
     [Object.assign(new Error('aborted'), { name: 'AbortError' }), 'cancelled'],
@@ -347,12 +349,20 @@ function sequenceFetch(statuses, { body = {} } = {}) {
       });
     }
     const ok = status >= 200 && status < 300;
+    // 非 2xx 时 `body` 就是**对端给的原因**，且必须同时提供 text() —— 生产代码用
+    // text() 读取它（不能先 json()，否则非 JSON 的错误页会抛异常、原因又丢了）。
+    const errorBody = body && Object.keys(body).length
+      ? body
+      : { error: { message: 'boom' } };
     return {
       ok,
       status,
       json: async () => (ok
         ? { model: 'm', answers: [{ id: 'overall_score', type: 'score', score: 4.1, confidence: 0.5 }], usage: body }
-        : { error: { message: 'boom' } }),
+        : errorBody),
+      text: async () => JSON.stringify(ok
+        ? { model: 'm', answers: [{ id: 'overall_score', type: 'score', score: 4.1, confidence: 0.5 }], usage: body }
+        : errorBody),
     };
   };
   return { fetchImpl, calls };
@@ -408,16 +418,66 @@ test('§5.1 重试：auth / parse 不得重试（重投只会得到同样结果�
   assert.equal(parseSeq.calls.length, 1, '非 JSON 响应不得重试');
 });
 
-test('§5.1 重试：400/404 这类 4xx 虽用 server 文案，但不得自动重试', async () => {
+test('§5.4b 重试：400/404 归为 endpoint_rejected 且不得自动重试', async () => {
   for (const status of [400, 404]) {
     const seq = sequenceFetch([status]);
     await assert.rejects(
       () => makeApi({ config: config(), fetchImpl: seq.fetchImpl }).ask({ state: 's', questions: QUESTIONS }),
-      (err) => err.kind === 'server' && err.status === status && err.retryable === false,
-      `${status} 必须 retryable=false`,
+      (err) => err.kind === 'endpoint_rejected' && err.status === status && err.retryable === false,
+      `${status} 必须 endpoint_rejected 且 retryable=false`,
     );
     assert.equal(seq.calls.length, 1, `${status} 不得重试`);
   }
+});
+
+test('§5.4b 错误详情：对端给的说明要透传到 classifyError 的 message 里', async () => {
+  // 以前非 2xx 时对端的原因被整段丢掉，用户只看到「决策模型服务出错了」——
+  // 无法判断是 Key 错、模型名不存在还是路径写错。实测：JEv 的 403 就这样被误显示。
+  const seq = sequenceFetch([400], { body: { error: { message: 'model not found: jev-latest' } } });
+  const api = makeApi({ config: config(), fetchImpl: seq.fetchImpl });
+  let caught = null;
+  try {
+    await api.ask({ state: 's', questions: QUESTIONS });
+  } catch (err) {
+    caught = err;
+  }
+  assert.ok(caught, '应当抛出');
+  assert.equal(caught.kind, 'endpoint_rejected');
+  assert.equal(caught.upstreamDetail, 'model not found: jev-latest');
+  const info = classifyError(caught);
+  assert.match(info.message, /model not found/, '对端的原话必须出现在给用户看的文案里');
+});
+
+test('§5.4b 错误详情：多模态端点的失败原因同样要透传（视觉连通性测试要用）', async () => {
+  const seq = sequenceFetch([401], { body: { error: { message: 'Incorrect API key provided' } } });
+  const api = makeApi({
+    config: { ...config(), visionBaseUrl: 'https://api.deepseek.com/v1', visionModel: 'm', visionApiKey: 'bad' },
+    fetchImpl: seq.fetchImpl,
+  });
+  let caught = null;
+  try {
+    await api.vision({ system: 's', content: 'ping', answerId: 'ping' });
+  } catch (err) {
+    caught = err;
+  }
+  assert.ok(caught, '应当抛出');
+  assert.equal(caught.kind, 'auth');
+  const info = classifyError(caught);
+  assert.match(info.message, /Incorrect API key/, '必须能看出是 Key 不对');
+});
+
+test('§5.4b 错误详情：绝不把 Key 回显出来（脱敏）', async () => {
+  const seq = sequenceFetch([400], { body: { error: { message: 'bad key sk-abcdef123456 rejected' } } });
+  const api = makeApi({ config: config(), fetchImpl: seq.fetchImpl });
+  let caught = null;
+  try {
+    await api.ask({ state: 's', questions: QUESTIONS });
+  } catch (err) {
+    caught = err;
+  }
+  assert.ok(caught);
+  assert.ok(!/sk-abcdef123456/.test(caught.upstreamDetail), 'Key 必须被脱敏');
+  assert.match(caught.upstreamDetail, /sk-\*\*\*/);
 });
 
 test('§5.1 重试：rate_limit 用文案里的 2000ms 退避，且最终抛出 rate_limit', async () => {

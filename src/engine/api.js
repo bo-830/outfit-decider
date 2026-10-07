@@ -195,13 +195,21 @@ export function makeApi({ config, fetchImpl = globalThis.fetch } = {}) {
         : Number.isFinite(status) && status >= 200 && status < 300;
       if (!ok) {
         // SPEC §5.1 的 server 行专指 5xx。其余非 401/403/429 的 4xx（400 参数错、404 路径错…）
-        // 重投一次也只会得到同样结果，只会让用户多等，因此借用 server 文案但**禁止重试**。
+        // 重投一次也只会得到同样结果，只会让用户多等，因此**禁止重试**。
         const kind = statusKind(status);
         const clientError = Number.isFinite(status) && status >= 400 && status < 500
           && kind !== 'auth' && kind !== 'rate_limit';
+        // 把对端自己给的原因读出来（读不到就算了），否则用户只看到笼统文案
+        let detail = '';
+        try {
+          if (response && typeof response.text === 'function') detail = upstreamDetailFrom(await response.text());
+        } catch {
+          detail = '';
+        }
         throw apiError(kind, {
           status: Number.isFinite(status) ? status : 0,
-          ...(clientError ? { retryable: false } : {}),
+          ...(clientError || kind === 'endpoint_rejected' ? { retryable: false } : {}),
+          ...(detail ? { upstreamDetail: detail } : {}),
         });
       }
 
@@ -418,7 +426,7 @@ export function makeApi({ config, fetchImpl = globalThis.fetch } = {}) {
       const ok = response && typeof response.ok === 'boolean'
         ? response.ok
         : Number.isFinite(status) && status >= 200 && status < 300;
-      if (!ok) throw apiError(statusKind(status), { status: Number.isFinite(status) ? status : 0 });
+      if (!ok) await throwForBadStatus(response, status);
 
       let data;
       try {
@@ -520,7 +528,24 @@ export function makeApi({ config, fetchImpl = globalThis.fetch } = {}) {
       const ok = response && typeof response.ok === 'boolean'
         ? response.ok
         : Number.isFinite(status) && status >= 200 && status < 300;
-      if (!ok) throw apiError(statusKind(status), { status: Number.isFinite(status) ? status : 0 });
+      if (!ok) {
+        // SPEC §5.1 的 server 行专指 5xx。其余非 401/403/429 的 4xx（400 参数错、404 路径错…）
+        // 重投一次也只会得到同样结果，只会让用户多等，因此借用文案但**禁止重试**。
+        const kind = statusKind(status);
+        const clientError = Number.isFinite(status) && status >= 400 && status < 500
+          && kind !== 'auth' && kind !== 'rate_limit';
+        let detail = '';
+        try {
+          if (response && typeof response.text === 'function') detail = upstreamDetailFrom(await response.text());
+        } catch {
+          detail = '';
+        }
+        throw apiError(kind, {
+          status: Number.isFinite(status) ? status : 0,
+          ...(clientError || kind === 'endpoint_rejected' ? { retryable: false } : {}),
+          ...(detail ? { upstreamDetail: detail } : {}),
+        });
+      }
 
       let data;
       try {
@@ -619,9 +644,16 @@ function toTokenCount(value) {
 export function classifyError(err) {
   const kind = detectKind(err);
   const info = errorInfo(kind);
+  /**
+   * 对端给了具体原因时，把它附在文案后面 —— 否则用户只看到「决策模型服务出错了」，
+   * 无法判断到底是 Key 错、模型名不存在还是路径写错（实测踩过）。
+   * 只附一行、且上游详情已在 upstreamDetailFrom 里脱敏（sk-***）。
+   */
+  const detail = typeof err?.upstreamDetail === 'string' ? err.upstreamDetail.trim() : '';
+  const message = detail ? `${info.message}（对端说：${detail}）` : info.message;
   return {
     kind,
-    message: info.message,
+    message,
     action: info.action,
     retryable: info.retryable === true,
   };
@@ -661,7 +693,55 @@ function statusKind(status) {
   if (status === 401 || status === 403) return 'auth';
   if (status === 429) return 'rate_limit';
   if (status >= 500) return 'server';
+  // 其余 4xx：是"我们的请求不对"（Key 权限、模型名不存在、路径错、参数错），
+  // 不是服务端故障。归成 server 会把用户引向错误的排查方向（实测踩过）。
+  if (status >= 400 && status < 500) return 'endpoint_rejected';
   return 'server';
+}
+
+/**
+ * 从对端的错误响应里抠出**它自己给的原因**，用来替换/补充笼统文案。
+ *
+ * 为什么重要：HTTP 非 2xx 时对端通常会在 body 里说清楚原因
+ * （如 `{"error":{"message":"Invalid API key"}}`、`{"message":"model not found"}`）。
+ * 以前这些全被丢掉，用户只看到「决策模型服务出错了，请稍后再试」，
+ * 查日志也无从下手 —— 实测：JEv 的 403 就因此被显示成"决策模型服务出错"。
+ *
+ * 只取一小段纯文本，绝不回显 Key；读不出来就返回空串。
+ */
+function upstreamDetailFrom(text) {
+  const raw = String(text == null ? '' : text).trim();
+  if (!raw) return '';
+  let msg = '';
+  try {
+    const parsed = JSON.parse(raw);
+    msg = (parsed && parsed.error && (parsed.error.message || parsed.error.detail))
+      || (parsed && (parsed.message || parsed.detail || parsed.error))
+      || '';
+    if (typeof msg !== 'string') msg = JSON.stringify(msg);
+  } catch {
+    msg = raw;
+  }
+  msg = String(msg).replace(/sk-[A-Za-z0-9_-]{6,}/g, 'sk-***').replace(/\s+/g, ' ').trim();
+  return msg.slice(0, 160);
+}
+
+/**
+ * 非 2xx → 抛出带对端原因的错误。
+ * 两条通道（决策模型 / 多模态端点）共用，保证错误信息口径一致：
+ * 都带 `status`，并在能读出对端说明时附上 `upstreamDetail`。
+ */
+async function throwForBadStatus(response, status) {
+  let detail = '';
+  try {
+    if (response && typeof response.text === 'function') detail = upstreamDetailFrom(await response.text());
+  } catch {
+    detail = '';
+  }
+  throw apiError(statusKind(status), {
+    status: Number.isFinite(status) ? status : 0,
+    ...(detail ? { upstreamDetail: detail } : {}),
+  });
 }
 
 /** SPEC §5.1 的错误分类；`extra.retryable` 可用于按具体状态码收紧重试（如 400/404 不重试）。 */
