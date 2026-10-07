@@ -572,7 +572,10 @@ export default function App() {
       // 用户分两次各选 1 张时，第二次会把前一张冲掉 —— 看起来就像"只能上传一张"。
       // 追加规则抽成 appendArtifacts 纯函数（src/core/protocol.js），有直接单测。
       const existing = flowRef.current?.artifacts || [];
-      if (existing.length >= MAX_LOOKS) return; // 已满，界面会显示"已选满"
+      if (existing.length >= MAX_LOOKS) {
+        console.log(`[ODPICK] early-return: full existing=${existing.length}`);
+        return; // 已满，界面会显示"已选满"
+      }
 
       const seeds = [];
       for (const asset of result.assets.slice(0, MAX_LOOKS - existing.length)) {
@@ -589,6 +592,13 @@ export default function App() {
       if (!appended) return;
 
       const next = appended.artifacts;
+      // 临时诊断：用户实测"第二套顶掉第一套"，需要看到每一步的真实数量。
+      // ASCII 标记便于 adb logcat 过滤。稳定后删除。
+      console.log(
+        `[ODPICK] picked=${result.assets.length} seeds=${seeds.length} existing=${existing.length} `
+        + `existingIds=${existing.map((a) => a.lookId).join(',') || '-'} `
+        + `next=${next.length} nextIds=${next.map((a) => a.lookId).join(',')}`,
+      );
       imagesRef.current = Object.fromEntries(next.map((item) => [item.lookId, item]));
       setExpandedLookId(null);
       dispatch({ type: 'SET_ARTIFACTS', artifacts: next });

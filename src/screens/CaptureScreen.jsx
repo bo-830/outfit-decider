@@ -78,6 +78,12 @@ export default function CaptureScreen({
           <Text style={styles.sub}>
             {count ? `已选 ${count} 套 · 看看哪套最合适` : '选 1-4 张今天的穿搭照，再告诉我场合'}
           </Text>
+          {/* DIAGNOSTIC (temporary): 用户实测"加第二套会顶掉第一套"，
+              需要区分是"状态没累加"还是"累加了没渲染"。这行直接暴露 state。
+              定位后删除。 */}
+          <Text testID="diag-artifacts" style={styles.diag}>
+            {`DIAG state=${count} ids=${(artifacts || []).map((a) => a.lookId).join('/') || '-'}`}
+          </Text>
         </View>
 
         <LookGrid artifacts={artifacts} onPick={onPickImages} onRemove={onRemoveLook} busy={pickBusy} />
@@ -172,6 +178,8 @@ const styles = StyleSheet.create({
   flex: { flex: 1 },
   content: { paddingBottom: space.xl },
   head: { paddingHorizontal: layout.padX, paddingTop: space.lg, paddingBottom: space.md + 2 },
+  // DIAGNOSTIC (temporary): 见 diag-artifacts 的说明，定位后删除
+  diag: { fontFamily: SANS, fontSize: font.small, color: colors.textDim, opacity: 0.7 },
   h1: { fontFamily: SANS, fontSize: font.h1, fontWeight: '600', color: colors.text, letterSpacing: -0.4 },
   sub: { fontFamily: SANS, fontSize: font.small, color: colors.textDim, marginTop: space.sm - 2 },
   block: { marginTop: space.xl - 4 },
