@@ -2,6 +2,7 @@ import React, { useRef, useState } from 'react';
 import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ENGINE_MODES } from '../engine/api.js';
+import { providerMismatch, providerOptions, providerPreset } from '../core/provider.js';
 import { colors, font, HIT, layout, radius, space } from '../ui/theme';
 import { SANS } from '../ui/platform';
 import SectionLabel from '../components/SectionLabel.jsx';
@@ -13,38 +14,20 @@ import SectionLabel from '../components/SectionLabel.jsx';
  */
 const ENGINE_MODE_ROWS = {
   laya_only: {
-    title: '只用 Laya 本地模型',
-    sub: '不花钱、离线可用；判断力实测偏弱',
+    title: '本地模型直接打分',
+    sub: '快、不花钱；实测判断力偏弱',
   },
   laya_review: {
-    title: 'Laya + 多模态纠正',
-    sub: '先用本地模型打分，再由能看图的模型纠正',
+    title: '本地打分 + 多模态纠正',
+    sub: '先由决策模型打分，再让能看图的模型纠正',
   },
   multimodal_only: {
     title: '只用多模态模型',
-    sub: '跳过本地模型，直接由能看图的模型判断',
+    sub: '不经决策模型，直接让能看图的模型判断',
   },
 };
 
 const DEFAULT_ENGINE_MODE = 'laya_review';
-
-/**
- * SPEC §3.10b · 直连 TypeSafe JEv 的四个值。
- *
- * 依据官方文档（https://docs.typesafe.ai）：端点是 `/v1/systemone`，
- * 模型别名 `jev-latest`，`questions` 必须是 map（由 src/core/jev.js 负责转换）。
- * 一次填好这四项，用户只需再填自己的 API Key —— 没有电脑、跑不了本机适配器的用户
- * 也能用，这是这个预设存在的唯一理由。
- */
-export function jevPreset() {
-  return {
-    baseUrl: 'https://api.typesafe.ai/v1',
-    askPath: '/systemone',
-    healthPath: '/systemone',
-    model: 'jev-latest',
-    protocol: 'jev',
-  };
-}
 
 /**
  * 锁定态必须是**真的不可操作**，而不是只把颜色调灰：
@@ -432,69 +415,54 @@ export default function SettingsScreen({
           />
           <Text style={styles.groupSub}>负责打分。它在纠正之前运行，所以视觉模型要先配好。</Text>
           <View style={styles.modeRow}>
-            {[
-              { id: 'jev', label: 'JEv 云端', hint: '带 API Key' },
-              { id: 'laya', label: 'Laya 本地', hint: '局域网部署' },
-            ].map((item) => {
-              const active = config.mode === item.id;
-              return (
-                <Pressable
-                  key={item.id}
-                  testID={`engine-mode-${item.id}`}
-                  accessibilityRole="button"
-                  accessibilityState={{ selected: active, disabled: decisionLocked }}
-                  onPress={() => patch({ mode: item.id })}
-                  disabled={decisionLocked}
-                  style={({ pressed }) => [
-                    styles.mode,
-                    active && styles.modeOn,
-                    decisionLocked && styles.modeLocked,
-                    decisionLocked && active && styles.modeLockedOn,
-                    pressed && styles.pressed,
+            {providerOptions(config).map((item) => (
+              <Pressable
+                key={item.id}
+                testID={`engine-mode-${item.id}`}
+                accessibilityRole="button"
+                accessibilityState={{ selected: item.active, disabled: decisionLocked }}
+                onPress={() => patch(providerPreset(item.id))}
+                disabled={decisionLocked}
+                style={({ pressed }) => [
+                  styles.mode,
+                  item.active && styles.modeOn,
+                  decisionLocked && styles.modeLocked,
+                  decisionLocked && item.active && styles.modeLockedOn,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.modeLabel,
+                    !decisionLocked && item.active && styles.modeLabelOn,
+                    decisionLocked && item.active && styles.modeLabelLockedOn,
                   ]}
                 >
-                  <Text
-                    style={[
-                      styles.modeLabel,
-                      !decisionLocked && active && styles.modeLabelOn,
-                      decisionLocked && active && styles.modeLabelLockedOn,
-                    ]}
-                  >
-                    {item.label}
-                  </Text>
-                  <Text style={[styles.modeHint, !decisionLocked && active && styles.modeHintOn]}>{item.hint}</Text>
-                </Pressable>
-              );
-            })}
+                  {item.label}
+                </Text>
+                <Text
+                  testID={`engine-mode-${item.id}-hint`}
+                  style={[
+                    styles.modeHint,
+                    item.active && styles.modeHintOn,
+                    decisionLocked && styles.modeHintLocked,
+                  ]}
+                >
+                  {item.hint}
+                </Text>
+              </Pressable>
+            ))}
           </View>
+          {/* 两个控件曾经可以互相矛盾（选"本地"却把地址改成云端）。一旦不一致就明说。 */}
+          {providerMismatch(config) ? (
+            <Text testID="provider-mismatch" style={styles.warn}>
+              {providerMismatch(config)}
+            </Text>
+          ) : null}
         </View>
 
         <View style={styles.block}>
           <SectionLabel title="决策模型地址" meta="本机 / 局域网都行" dim={decisionLocked} />
-          {/* SPEC §3.10b · 一键切到直连 TypeSafe JEv。
-              没有电脑的用户跑不了本机适配器，只能让 App 自己直连云端；
-              四个值（地址/路径/模型/协议）手填容易错，所以给一个预设。 */}
-          <View style={styles.padX}>
-            <Pressable
-              testID="btn-preset-jev"
-              accessibilityRole="button"
-              accessibilityState={{ disabled: decisionLocked }}
-              disabled={decisionLocked}
-              onPress={() => patch(jevPreset())}
-              style={({ pressed }) => [
-                styles.preset,
-                decisionLocked && styles.presetLocked,
-                pressed && styles.pressed,
-              ]}
-            >
-              <Text style={[styles.presetTitle, decisionLocked && styles.presetTitleLocked]}>
-                直连 TypeSafe JEv（无需电脑）
-              </Text>
-              <Text style={styles.presetSub}>
-                把地址/路径/模型/协议一次填好；需要你自己的 API Key，并在下面保存
-              </Text>
-            </Pressable>
-          </View>
           <Field
             label="baseUrl"
             testID="engine-baseurl"
@@ -828,6 +796,7 @@ const styles = StyleSheet.create({
   modeLabelLockedOn: { color: colors.text },
   modeHint: { fontFamily: SANS, fontSize: font.tiny, color: colors.textDim, marginTop: 3 },
   modeHintOn: { color: colors.surfaceAlt },
+  modeHintLocked: { color: colors.textDim },
   field: { marginBottom: space.md },
   fieldHead: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: space.xs + 2 },
   fieldLabel: { fontFamily: SANS, fontSize: font.tiny + 1, color: colors.textDim },
@@ -861,22 +830,15 @@ const styles = StyleSheet.create({
   secondaryLocked: { borderColor: colors.border, backgroundColor: colors.surfaceAlt },
   secondaryTextLocked: { color: colors.textDim },
   pressed: { opacity: 0.75 },
-  // 直连 JEv 预设：跟随已选中/未选中卡片的同一套观感，只做一层描边按钮
-  preset: {
-    minHeight: HIT,
-    justifyContent: 'center',
-    paddingVertical: space.sm,
-    paddingHorizontal: space.md,
-    marginBottom: space.sm,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.surface,
+  // 供应商与档位不一致时的提示（例如选了"本地"但地址指向云端）
+  warn: {
+    fontFamily: SANS,
+    fontSize: font.small,
+    lineHeight: 18,
+    color: colors.warn,
+    paddingHorizontal: layout.padX,
+    marginTop: space.sm,
   },
-  presetLocked: { backgroundColor: colors.surfaceAlt },
-  presetTitle: { fontFamily: SANS, fontSize: font.body, fontWeight: '600', color: colors.text },
-  presetTitleLocked: { color: colors.textDim },
-  presetSub: { fontFamily: SANS, fontSize: font.small, lineHeight: 18, color: colors.textDim, marginTop: 2 },
   disabled: { opacity: 0.5 },
   note: { fontFamily: SANS, fontSize: font.tiny + 0.5, lineHeight: 17, color: colors.textDim, marginTop: space.sm },
   connBox: { marginTop: space.sm, minHeight: 44, justifyContent: 'center' },

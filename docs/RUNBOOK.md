@@ -184,17 +184,19 @@ tools\start-outfit-decider.bat stop     # 收工（按 PID + 端口精确停，�
 
 ### 2.00 App **直连** TypeSafe JEv（没有电脑也能用）
 
-设置页有一键预设：点 **「直连 TypeSafe JEv（无需电脑）」**，它会填好四项：
+设置页「用哪家的模型打分」二选一，**点一下就整套配好**（不会再出现两个设置互相矛盾）：
 
-```
-baseUrl  = https://api.typesafe.ai/v1
-askPath  = /systemone
-model    = jev-latest
-protocol = jev
-```
+| 点这个 | 自动填好 |
+|---|---|
+| **JEv 云端** | `https://api.typesafe.ai/v1` + `/systemone` + `jev-latest` + 协议 `jev` |
+| **Laya 本地** | `http://127.0.0.1:8787` + `/ask` + `/health` + 协议 `generic`（需电脑常驻跑适配器） |
 
-你只需再填自己的 API Key（https://console.typesafe.ai/keys）并点「保存 Key」。
-也可以走 `tools\use-jev.bat` 经本机适配器中转（见 §2.0），两者不冲突。
+选 JEv 后你只需再填自己的 API Key（https://console.typesafe.ai/keys）并点「保存 Key」。
+
+> 早期版本这里有个独立按钮「直连 TypeSafe JEv」，和上面的档位选择互不相干：
+> 选了「Laya 本地」还能点它、一点就把地址改成云端（本地被悄悄覆盖）；
+> 也会出现"上面写 Laya、实际打 JEv"。现在改为**选供应商即写整套配置**，
+> 并且不一致时会明确提示。详见 SPEC §3.10c。
 
 **App 会自动做的翻译**（所以你不必管形状）：App 发的是 `questions` 数组，
 而 JEv 要的是 map（`id → {type,instructions,criteria}`）；命中 `typesafe.ai` 时

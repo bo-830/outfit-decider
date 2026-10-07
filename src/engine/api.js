@@ -14,7 +14,12 @@ const AUTO_RETRY_MAX = 1;
 const AUTO_RETRY_DELAY_MS = 600;
 
 export const DEFAULT_CONFIG = {
-  mode: 'jev',
+  /**
+   * 上游是哪一家（决定出站是否带 API Key）。
+   * 必须与默认 baseUrl 一致：默认 baseUrl 是**本机适配器**，所以默认也是 `laya`。
+   * 之前默认写成 `jev` 而 baseUrl 指向本机 —— 两者矛盾（§3.10b 的一致性检查会报出来）。
+   */
+  mode: 'laya',
   // SPEC §3.9c 三档引擎模式：laya_only ｜ laya_review（默认）｜ multimodal_only
   engineMode: 'laya_review',
   // 多模态端点与决策模型**分开配置**：laya_review 下「谁看图」和「谁打分」是两个不同的服务。

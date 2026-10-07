@@ -13,12 +13,26 @@ import {
 import { ERRORS, UNRECOGNIZABLE } from '../src/data/copy.js';
 import { makeFetchMock } from './helpers/fetchMock.js';
 
-const config = (overrides = {}) => ({ ...DEFAULT_CONFIG, apiKey: 'sk-secret-key', ...overrides });
+/**
+ * 测试用配置：显式声明走「JEv 云端 + API Key」。
+ *
+ * 为什么必须显式写 `mode: 'jev'`：DEFAULT_CONFIG 的默认 mode 是 `laya`
+ * （默认 baseUrl 是本机适配器，不带出站 Key）。本文件大量用例在断言
+ * `Authorization: Bearer …`，依赖的是"云端会带 Key"这个语义，
+ * 不该靠默认值碰巧成立 —— 默认值一改就会连带变红（实测踩过）。
+ */
+const config = (overrides = {}) => ({
+  ...DEFAULT_CONFIG,
+  mode: 'jev',
+  apiKey: 'sk-secret-key',
+  ...overrides,
+});
 const QUESTIONS = [{ id: 'overall_score', type: 'score', question: '打分' }];
 
 test('DEFAULT_CONFIG 与 SPEC §3.10 逐字一致', () => {
   assert.deepEqual(DEFAULT_CONFIG, {
-    mode: 'jev',
+    // 上游默认是本机适配器，所以默认 mode 必须是 laya（曾误设为 jev，与 baseUrl 矛盾）
+    mode: 'laya',
     // v1.5 §3.9c：三档引擎模式与独立的多模态通道
     engineMode: 'laya_review',
     visionBaseUrl: '',

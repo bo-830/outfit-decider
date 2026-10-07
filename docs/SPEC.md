@@ -503,6 +503,29 @@ JEv **不做文本生成**（文档原话 "No text generation"），只答 choic
 （RN 的 fetch 不执行 CORS），所以这是 web 预览的固有限制、不是缺陷；
 web 上验证请走本机适配器（§3.11）。
 
+### 3.10c 供应商选择必须与"打分档位"一致（v1.7 新增）
+
+设置页有两套**不同维度**的控件，早期版本让它们互不相干，于是出现两种怪现象（用户实测反馈）：
+
+1. 选了「Laya 本地」还能点「直连 TypeSafe JEv」，一点就把地址改成云端 ——
+   **本地被悄悄覆盖**，两个设置互相矛盾；
+2. 上面写着 "Laya"、实际打分的却是 `baseUrl` 指向的 JEv —— **"Laya"那一档也能连上 JEv**。
+
+**要求**（实现见 `src/core/provider.js`，纯逻辑、可单测）：
+
+- **选供应商 = 同时把整套配置填好**，不可能再矛盾：
+  - `jevPreset()`：`mode:'jev'`、`baseUrl:'https://api.typesafe.ai/v1'`、
+    `askPath/healthPath:'/systemone'`、`model:'jev-latest'`、`protocol:'jev'`。
+  - `layaPreset()`：`mode:'laya'`、`baseUrl:'http://127.0.0.1:8787'`、
+    `askPath:'/ask'`、`healthPath:'/health'`、`model:''`、**`protocol:'generic'`**。
+    最后这条**不是冗余**：适配器只懂数组式通用协议，若留着 `'jev'`，
+    App 会把 JEv 的 map 形状直接发给适配器，形状对不上。
+- `providerOptions()` 恒有且只有一项高亮；判断复用 `resolveProtocol`（按**主机名**），
+  不要自己写 `/typesafe\.ai/` 正则 —— 会被 `evil-typesafe.ai` 这类伪装域名骗到。
+- 档位与供应商不一致时 `providerMismatch()` 必须给出可操作提示；一致时返回空串。
+- `DEFAULT_CONFIG.mode` 必须与默认 `baseUrl` 一致（都是本机）→ 默认 `'laya'`。
+  曾误设为 `'jev'`，与默认 baseUrl 自相矛盾。
+
 ### 3.11b 批处理打分（v1.6 新增）
 
 **动机**：`scoreSystem` 原本对每套发一次 `/ask`（4 套 = 4 次往返）。Laya 的
