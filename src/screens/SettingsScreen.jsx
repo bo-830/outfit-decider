@@ -2,7 +2,7 @@ import React, { useRef, useState } from 'react';
 import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ENGINE_MODES } from '../engine/api.js';
-import { providerMismatch, providerOptions, providerPreset } from '../core/provider.js';
+import { isJevConfigured, providerMismatch, providerOptions, providerPreset } from '../core/provider.js';
 import { colors, font, HIT, layout, radius, space } from '../ui/theme';
 import { SANS } from '../ui/platform';
 import SectionLabel from '../components/SectionLabel.jsx';
@@ -144,6 +144,14 @@ export default function SettingsScreen({
   const visionServerSide = config.visionServerSide === true;
   const visionReady = visionFilled || visionServerSide;
   /**
+   * 本地供应商（Laya）：视觉模型必须由 **App 自己** 配。
+   * 适配器只把 App 的数组式请求翻成 Laya 的形状，它不负责看图；
+   * 所以"已配在服务端"这个放行开关在本地档位下是**陷阱** —— 勾了它、
+   * 服务端又没配，纠正会静默失效（结果页才提示，太晚）。
+   * 这里据此给用户明确指引（不强行禁用，因为确实有人把视觉配在服务端）。
+   */
+  const localProvider = !isJevConfigured(config);
+  /**
    * 闸门只在**真的要用视觉模型**的档位生效：`laya_only` 既不纠正、describe 也走本地通道，
    * 那时锁住决策组等于让纯本地模式不可用——顺序要求不该以一整档不可用为代价。
    * 判据与 `src/engine/orchestrator.js` 的运行时分档一致：只有 `laya_only` 例外；
@@ -263,6 +271,12 @@ export default function SettingsScreen({
               <Text style={styles.checkSub}>
                 勾选后若服务端其实没配置，结果页会提示「纠正未生效」——那说明这个开关该取消。
               </Text>
+              {localProvider ? (
+                <Text testID="vision-local-hint" style={styles.checkSub}>
+                  用 Laya 本地时，适配器只做协议桥、不负责看图，所以**这一组请在 App 里填**
+                  （Base URL + 模型名 + Key）。只有你确实在服务端配好了才勾上面这一项。
+                </Text>
+              ) : null}
             </View>
           </Pressable>
 
@@ -421,7 +435,7 @@ export default function SettingsScreen({
                 testID={`engine-mode-${item.id}`}
                 accessibilityRole="button"
                 accessibilityState={{ selected: item.active, disabled: decisionLocked }}
-                onPress={() => patch(providerPreset(item.id))}
+                onPress={() => patch(providerPreset(item.id, config))}
                 disabled={decisionLocked}
                 style={({ pressed }) => [
                   styles.mode,

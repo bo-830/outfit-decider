@@ -11,7 +11,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  applyJevProvider,
+  applyLayaProvider,
   isJevConfigured,
+  isLoopbackBaseUrl,
+  isUsableLocalBaseUrl,
   jevPreset,
   layaPreset,
   providerMismatch,
@@ -36,11 +40,14 @@ test('jevPreset：一次填好协议所需全部字段（地址/路径/模型/�
 test('layaPreset：切回本机时必须把 protocol 显式改成 generic（否则形状发错）', () => {
   const p = layaPreset();
   assert.equal(p.mode, 'laya');
-  assert.equal(p.baseUrl, 'http://127.0.0.1:8787');
   assert.equal(p.askPath, '/ask');
   assert.equal(p.model, '', '不能把 JEv 的模型别名发给本机');
   // 关键：适配器只懂数组式通用协议；若留着 'jev'，App 会把 map 形状发给它 → 形状对不上
   assert.equal(p.protocol, 'generic');
+  // 视觉模型由 App 自己配，不能沿用在服务端那个放行开关
+  assert.equal(p.visionServerSide, false, '本地档位下视觉必须由 App 配');
+  // 地址**故意不写死**：真机上 127.0.0.1 指手机自己，电脑 IP 还会变
+  assert.equal(p.baseUrl, '', '本地地址不能预设，否则用户以为配好了却连不上');
   assert.notEqual(p.protocol, 'jev');
   assert.equal(resolveProtocol(p.baseUrl, p.protocol), 'generic');
 });
@@ -81,23 +88,94 @@ test('providerMismatch：选「云端」但地址不是 TypeSafe → 也要提�
 
 test('providerMismatch：一致时不打扰用户', () => {
   assert.equal(providerMismatch({ ...DEFAULT_CONFIG, ...jevPreset() }), '');
-  assert.equal(providerMismatch({ ...DEFAULT_CONFIG, ...layaPreset() }), '');
+  // 本地模式必须有地址才算一致（地址是用户填的，不属于"预设"的一部分）
+  assert.equal(providerMismatch({ mode: 'laya', baseUrl: 'http://192.168.1.20:8787', protocol: 'generic' }), '');
+});
+
+test('providerMismatch：本地模式没填地址 → 必须提示（真机上最难自查的一种错）', () => {
+  const msg = providerMismatch({ mode: 'laya', baseUrl: '', protocol: 'generic' });
+  assert.ok(msg.length > 0);
+  assert.match(msg, /127\.0\.0\.1/, '要明说真机上不能填 127.0.0.1');
+  assert.match(msg, /IP/, '要告诉用户填局域网 IP');
+});
+
+test('providerMismatch：本地模式用环回地址 → 也要提示（模拟器能用，真机不能）', () => {
+  // 这一种最迷惑人：能连上（模拟器），用户以为配好了，换真机就静默失效
+  for (const url of ['http://127.0.0.1:8787', 'http://localhost:8787']) {
+    const msg = providerMismatch({ mode: 'laya', baseUrl: url, protocol: 'generic' });
+    assert.ok(msg.length > 0, `${url} 应提示`);
+    assert.match(msg, /模拟器/, '要说清只有模拟器能用');
+  }
+  // 局域网地址不提示
+  assert.equal(providerMismatch({ mode: 'laya', baseUrl: 'http://192.168.1.20:8787', protocol: 'generic' }), '');
+});
+
+test('isLoopbackBaseUrl：只认真正的环回地址', () => {
+  assert.equal(isLoopbackBaseUrl('http://127.0.0.1:8787'), true);
+  assert.equal(isLoopbackBaseUrl('http://localhost:8787'), true);
+  assert.equal(isLoopbackBaseUrl('http://192.168.1.20:8787'), false);
+  assert.equal(isLoopbackBaseUrl('http://127.0.0.1.evil.com:8787'), false);
+  assert.equal(isLoopbackBaseUrl(''), false);
 });
 
 test('两个预设 + 一致性检查构成闭环：点一下就消除矛盾', () => {
   // 用户先点了云端、又选了本地档位 → 矛盾
-  const conflicted = { ...DEFAULT_CONFIG, ...jevPreset(), mode: 'laya' };
+  const conflicted = { ...DEFAULT_CONFIG, ...applyJevProvider({}), mode: 'laya' };
   assert.ok(providerMismatch(conflicted).length > 0, '先确认这是矛盾状态');
-  // 点「Laya 本地」后必须完全一致
-  const fixed = { ...conflicted, ...layaPreset() };
-  assert.equal(providerMismatch(fixed), '');
-  assert.equal(resolveProtocol(fixed.baseUrl, fixed.protocol), 'generic');
+  // 点「Laya 本地」后必须消除"指向云端"这个矛盾
+  const fixed = { ...conflicted, ...applyLayaProvider(conflicted) };
+  assert.ok(!/云端/.test(providerMismatch(fixed)), '不该再说它指向云端');
+  assert.equal(resolveProtocol(fixed.baseUrl || 'http://x/', fixed.protocol), 'generic');
+});
+
+/* ── 局域网地址：不写死默认值，且切来切去不丢 ─────────────────── */
+
+test('isUsableLocalBaseUrl：云端地址与真机上的 127.0.0.1 都不该被当成本地地址记住', () => {
+  assert.equal(isUsableLocalBaseUrl('http://192.168.1.20:8787'), true);
+  assert.equal(isUsableLocalBaseUrl('http://10.63.1.253:8787'), true);
+  assert.equal(isUsableLocalBaseUrl('https://api.typesafe.ai/v1'), false, '云端不能当本地地址');
+  assert.equal(isUsableLocalBaseUrl('http://127.0.0.1:8787'), false, '真机上指手机自己');
+  assert.equal(isUsableLocalBaseUrl('http://localhost:8787'), false);
+  assert.equal(isUsableLocalBaseUrl(''), false);
+  assert.equal(isUsableLocalBaseUrl(undefined), false);
+});
+
+test('applyLayaProvider：复用记住的局域网地址，而不是覆盖成默认值', () => {
+  const p = applyLayaProvider({ localBaseUrl: 'http://192.168.1.20:8787' });
+  assert.equal(p.baseUrl, 'http://192.168.1.20:8787', 'IP 变了也应该复用用户上次填的，而不是清掉');
+  assert.equal(p.mode, 'laya');
+  assert.equal(p.visionServerSide, false);
+});
+
+test('applyLayaProvider：没有记住的地址时保持为空（宁可空着提示，也不给错地址）', () => {
+  assert.equal(applyLayaProvider({}).baseUrl, '');
+  assert.equal(applyLayaProvider({ baseUrl: 'https://api.typesafe.ai/v1' }).baseUrl, '');
+  assert.equal(applyLayaProvider({ baseUrl: 'http://127.0.0.1:8787' }).baseUrl, '');
+});
+
+test('applyLayaProvider：老用户升级路径——当前就是本地地址时直接复用', () => {
+  const p = applyLayaProvider({ baseUrl: 'http://192.168.73.231:8787', protocol: 'generic' });
+  assert.equal(p.baseUrl, 'http://192.168.73.231:8787');
+});
+
+test('applyJevProvider：切云端前把本地地址记进 localBaseUrl，切回来不丢', () => {
+  const toJev = applyJevProvider({ baseUrl: 'http://192.168.1.20:8787' });
+  assert.equal(toJev.baseUrl, 'https://api.typesafe.ai/v1');
+  assert.equal(toJev.localBaseUrl, 'http://192.168.1.20:8787', '必须先记住');
+  // 再切回本地
+  const back = applyLayaProvider({ ...toJev, ...toJev });
+  assert.equal(back.baseUrl, 'http://192.168.1.20:8787', '来回切换不能丢地址');
+});
+
+test('applyJevProvider：当前不是本地地址时不记脏数据', () => {
+  assert.equal(applyJevProvider({ baseUrl: 'http://127.0.0.1:8787' }).localBaseUrl, undefined);
+  assert.equal(applyJevProvider({}).localBaseUrl, undefined);
 });
 
 test('providerPreset：按 id 返回整套配置；未知 id 回落到本地（不把云端当地址）', () => {
-  assert.deepEqual(providerPreset('jev'), jevPreset());
-  assert.deepEqual(providerPreset('laya'), layaPreset());
-  assert.deepEqual(providerPreset('whatever'), layaPreset());
+  assert.deepEqual(providerPreset('jev', {}), applyJevProvider({}));
+  assert.deepEqual(providerPreset('laya', {}), applyLayaProvider({}));
+  assert.deepEqual(providerPreset('whatever', {}), applyLayaProvider({}));
 });
 
 test('isJevConfigured：协议或地址任一命中都算云端', () => {

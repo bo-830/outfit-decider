@@ -45,6 +45,9 @@ const PERSISTED_CONFIG_KEYS = [
   // v1.7 SPEC §3.10b：上游协议（auto/jev/generic）。直连 JEv 的用户填的地址与协议
   // 必须持久化，否则每次重启都退回 auto 并可能把请求发成错误的形状。
   'protocol',
+  // v1.7 SPEC §3.10c：记住用户填过的**局域网地址**。电脑 IP 会变，但"上次那个地址"
+  // 远比一个写死的默认值有用；切到 JEv 再切回本地时不会丢。
+  'localBaseUrl',
 ];
 
 /**

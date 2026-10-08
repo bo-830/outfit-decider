@@ -516,15 +516,43 @@ web 上验证请走本机适配器（§3.11）。
 - **选供应商 = 同时把整套配置填好**，不可能再矛盾：
   - `jevPreset()`：`mode:'jev'`、`baseUrl:'https://api.typesafe.ai/v1'`、
     `askPath/healthPath:'/systemone'`、`model:'jev-latest'`、`protocol:'jev'`。
-  - `layaPreset()`：`mode:'laya'`、`baseUrl:'http://127.0.0.1:8787'`、
-    `askPath:'/ask'`、`healthPath:'/health'`、`model:''`、**`protocol:'generic'`**。
-    最后这条**不是冗余**：适配器只懂数组式通用协议，若留着 `'jev'`，
+  - `layaPreset()`：`mode:'laya'`、**`baseUrl:''`**（见 §3.10d）、
+    `askPath:'/ask'`、`healthPath:'/health'`、`model:''`、**`protocol:'generic'`**、
+    `visionServerSide:false`。
+    倒数第二条**不是冗余**：适配器只懂数组式通用协议，若留着 `'jev'`，
     App 会把 JEv 的 map 形状直接发给适配器，形状对不上。
 - `providerOptions()` 恒有且只有一项高亮；判断复用 `resolveProtocol`（按**主机名**），
   不要自己写 `/typesafe\.ai/` 正则 —— 会被 `evil-typesafe.ai` 这类伪装域名骗到。
 - 档位与供应商不一致时 `providerMismatch()` 必须给出可操作提示；一致时返回空串。
 - `DEFAULT_CONFIG.mode` 必须与默认 `baseUrl` 一致（都是本机）→ 默认 `'laya'`。
   曾误设为 `'jev'`，与默认 baseUrl 自相矛盾。
+
+### 3.10d 本地地址不写死；本地档位视觉模型由 App 配（v1.7 新增）
+
+**① 本地 baseUrl 不允许预设。** 真机上 `127.0.0.1` 指**手机自己**，而电脑的局域网 IP
+会随路由器重新分配（实测在 `192.168.1.4` / `192.168.73.231` / `10.63.1.253` 之间变过）。
+写死一个"看起来对"的地址，只会让用户以为配好了却连不上。因此：
+
+- `layaPreset().baseUrl === ''`；`applyLayaProvider()` 优先复用 `config.localBaseUrl`
+  （用户填过的局域网地址，已加入 `PERSISTED_CONFIG_KEYS`），都没有就保持为空并提示。
+- `applyJevProvider()` 在切云端**之前**把当前本地地址记进 `localBaseUrl`，
+  所以来回切换不会丢地址。
+- `isUsableLocalBaseUrl()` 把云端地址与环回地址排除在"可记住"之外。
+- `localAddressIssue()` 区分三种情况（后果与修法都不同）：
+  1. **空** → 还没填；
+  2. **环回**（`127.0.0.1`/`localhost`）→ 模拟器或 `adb reverse` 能用，
+     **真机等于指向手机自己**。这是最迷惑人的一种：它能连上，用户以为配好了；
+  3. 其它 → 可用，但 IP 可能变。
+
+**② 本地档位下视觉模型由 App 自己配。** 适配器只做协议桥、不负责看图，所以
+`layaPreset()` 显式带 `visionServerSide:false`；设置页在本地档位下显示
+`vision-local-hint`，明确指引用户填「Base URL + 模型名 + Key」。
+「已配在服务端」开关仍然保留（确实有人把视觉配在服务端），但不再是默认路径 ——
+勾错时纠正会静默失效、要到结果页才提示，太晚。
+
+**③ 演示/评测的便利不等于默认值。** `DEFAULT_CONFIG.baseUrl` 仍是 `127.0.0.1:8787`，
+因为 §7 门禁的 mock 就起在这个端口、且 `verify.mjs` 的注入可能静默失败会回退到它。
+但用户侧**必须被明确提示**：本地档位 + 环回地址会给出上面的警告（§3.10d ①）。
 
 ### 3.11b 批处理打分（v1.6 新增）
 
