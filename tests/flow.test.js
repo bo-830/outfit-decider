@@ -22,7 +22,8 @@ const RANKED = [
 const REPORT = { ranking: [{ lookId: 'look1', stars: 4.5, oneLineReason: 'x' }], details: [], conclusion: {} };
 
 test('initialFlowState 与 SPEC §3.6 一致，且每次 RESET_ALL 得到全新对象', () => {
-  assert.deepEqual(FLOW_PHASES, ['idle', 'describing', 'scoring', 'quick_done', 'deep_running', 'deep_done', 'error']);
+  // §3.13c：deep_enriching = 已有快速结果、深度报告在后台补（界面继续显示结果，不挡进度页）
+  assert.deepEqual(FLOW_PHASES, ['idle', 'describing', 'scoring', 'quick_done', 'deep_enriching', 'deep_running', 'deep_done', 'error']);
   assert.equal(initialFlowState.phase, 'idle');
   assert.deepEqual(initialFlowState.userState, { occasion: [], weather: [], style: [], note: '' });
   assert.deepEqual(initialFlowState.question, { builtinId: null, text: '' });
@@ -151,9 +152,14 @@ test('RUN_QUICK_START 重新跑会清掉旧 deep，RUN_DEEP_START 保留 quick',
   const afterDeep = reduce(afterQuick, { type: 'DEEP_DONE', report: REPORT, lookId: 'look1' });
   assert.equal(afterDeep.phase, 'deep_done');
   const deepStarted = reduce(afterDeep, { type: 'RUN_DEEP_START' });
-  assert.equal(deepStarted.phase, 'deep_running');
+  // §3.13c：quick 已在 → 进 deep_enriching（界面继续显示排名），而不是拿进度页挡住用户
+  assert.equal(deepStarted.phase, 'deep_enriching');
   assert.equal(deepStarted.quick.ranked.length, 2, '深度分析不得清掉快速评分（§4.2 同屏对比）');
   assert.equal(deepStarted.deep.look1, REPORT, '已完成的报告保留');
+
+  // 没有 quick 时（只跑深度分析）仍然必须是阻塞的 deep_running —— 那时没有任何东西可看
+  const deepOnlyStarted = reduce(initialFlowState, { type: 'RUN_DEEP_START' });
+  assert.equal(deepOnlyStarted.phase, 'deep_running');
   const requick = reduce(afterDeep, { type: 'RUN_QUICK_START' });
   assert.equal(requick.deep, null, '重跑快速评分会作废旧深度报告');
   assert.equal(requick.phase, 'describing');
@@ -168,9 +174,20 @@ test('QUICK_FAIL / DEEP_FAIL / SET_ERROR / CLEAR_ERROR', () => {
   assert.equal(partial.error.lookId, 'look3');
   const quick = reduce(initialFlowState, { type: 'QUICK_DONE', ranked: RANKED, usage: null, model: null });
   const deepFail = reduce(quick, { type: 'DEEP_FAIL', error: { kind: 'server' }, lookId: 'look2' });
-  assert.equal(deepFail.phase, 'error');
+  /**
+   * §3.13c：深度分析失败时，**已有快速结果就不能被顶成错误页**。
+   * 原来一律 phase='error'：用户正看着排名，深度超时会把整页换成错误页，
+   * 让人以为快速结果也丢了。现在退回 quick_done，错误由结果页做非阻塞提示。
+   */
+  assert.equal(deepFail.phase, 'quick_done');
   assert.equal(deepFail.quick.ranked.length, 2, '深度失败不丢已出的分数');
-  assert.equal(deepFail.error.lookId, 'look2');
+  assert.equal(deepFail.error.lookId, 'look2', '错误仍要记录，供结果页提示');
+  // 没有快速结果时（只跑深度分析失败）才该是错误页
+  const deepOnlyFail = reduce(
+    reduce(initialFlowState, { type: 'RUN_DEEP_START' }),
+    { type: 'DEEP_FAIL', error: { kind: 'server' }, lookId: null },
+  );
+  assert.equal(deepOnlyFail.phase, 'error');
   assert.equal(reduce(deepFail, { type: 'CLEAR_ERROR' }).phase, 'quick_done', '清错回到有数据的那一相');
   assert.equal(reduce(deepFail, { type: 'CLEAR_ERROR' }).error, null);
   const deepDone = reduce(deepFail, { type: 'DEEP_DONE', report: REPORT, lookId: 'look1' });

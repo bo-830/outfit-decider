@@ -18,6 +18,9 @@ export const KEY_STORAGE = 'od.apikey.v1';
 /** v1.5：多模态端点（describe 与纠正用）的 Key 单独一个键，与决策模型的 Key 互不影响 */
 export const VISION_KEY_STORAGE = 'od.visionkey.v1';
 
+/** SPEC §3.12 · 中转口令的存储键（独立槽位，敏感度与 apiKey 同级）。 */
+export const RELAY_TOKEN_STORAGE = 'od.relaytoken.v1';
+
 const IS_WEB = Platform.OS === 'web';
 
 /** SecureStore 是否真的可用（web 恒 false；原生也做一次探测，失败不抛错） */
@@ -101,9 +104,30 @@ export async function clearVisionKey() {
   await clearStoredKey(VISION_KEY_STORAGE);
 }
 
+/* ── v1.7 §3.12：中转口令（与两把上游 Key 分开存，语义相同） ─────────────── */
+
+/**
+ * 保存中转口令 → Promise<{key, secure}>。
+ *
+ * 为什么要独立一个槽位：中转口令泄漏等于**我们的上游额度被白嫖**，
+ * 它的敏感度与 apiKey 同级，必须同样进钥匙串，不能混进普通配置对象里。
+ */
+export async function saveRelayToken(token) {
+  return saveStoredKey(RELAY_TOKEN_STORAGE, token);
+}
+
+/** 读取中转口令 → Promise<{key, secure}>。 */
+export async function loadRelayToken() {
+  return loadStoredKey(RELAY_TOKEN_STORAGE);
+}
+
+/** 清除中转口令 → Promise<void>。 */
+export async function clearRelayToken() {
+  await clearStoredKey(RELAY_TOKEN_STORAGE);
+}
+
 /** 通用：安全存储可用就写钥匙串，否则降级 AsyncStorage 明文。 */
-async function saveStoredKey(storageKey, key) {
-  const value = normalize(key);
+async function saveStoredKey(storageKey, key) {  const value = normalize(key);
   if (await isSecureStorageAvailable()) {
     try {
       if (value) await SecureStore.setItemAsync(storageKey, value);

@@ -30,6 +30,18 @@ export const FLOW_PHASES = [
   'describing',
   'scoring',
   'quick_done',
+  /**
+   * SPEC §3.13c · **已有快速结果、深度分析在后台继续**。
+   *
+   * 与 `deep_running` 的区别（这个区别就是第3条改动的全部意义）：
+   *   - `deep_running`：还没有任何结果可看，界面**必须**显示进度页 —— 用户只能等。
+   *   - `deep_enriching`：快速结果已经能看了，界面**显示结果**，深度报告到了再补上。
+   *
+   * 为什么需要它：深度分析实测 15–37 秒，而用户是在"要出门的那一刻"用它。
+   * 「两个都要」模式下如果先扣住结果页等深度分析，用户就要干等半分钟；
+   * 先给可用的排名，再渐进补上深度报告，体验完全不同。
+   */
+  'deep_enriching',
   'deep_running',
   'deep_done',
   'error',
@@ -155,9 +167,16 @@ export function flowReducer(state, action) {
       return { ...current, phase: 'error', error: withLookId(action.error, action.lookId) };
 
     case 'RUN_DEEP_START':
+      /**
+       * `background: true`（§3.13c）表示"快速结果已经在了，深度报告只是补充"。
+       *
+       * 判据是**有没有现成的快速结果**，而不是调用方说了算：
+       * 只要 quick 已在，就说明用户已经有东西可看，不该再拿进度页把他挡住。
+       * 这样即使调用方忘了传 background，也不会退化成"干等半分钟"。
+       */
       return {
         ...current,
-        phase: 'deep_running',
+        phase: current.quick ? 'deep_enriching' : 'deep_running',
         error: null,
         deep: current.deep && typeof current.deep === 'object' ? { ...current.deep } : {},
       };
@@ -171,7 +190,18 @@ export function flowReducer(state, action) {
       };
 
     case 'DEEP_FAIL':
-      return { ...current, phase: 'error', error: withLookId(action.error, action.lookId) };
+      /**
+       * §3.13c：深度分析**失败时不能把用户已经看到的快速结果顶掉**。
+       *
+       * 原来一律 `phase='error'`：在「两个都要」模式下，用户正看着排名，
+       * 深度分析超时会把整页换成错误页 —— 让人以为快速结果也没了。
+       * 现在有快速结果就退回 `quick_done`，错误挂在 error 上由结果页做**非阻塞**提示。
+       */
+      return {
+        ...current,
+        phase: current.quick ? 'quick_done' : 'error',
+        error: withLookId(action.error, action.lookId),
+      };
 
     case 'SET_ERROR':
       return { ...current, phase: 'error', error: withLookId(action.error, action.lookId) };

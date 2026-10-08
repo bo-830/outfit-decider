@@ -45,7 +45,13 @@ async function runQuickWithCapture() {
   // （只出分、无解释文本、零图片载荷），不掺入 v1.5 的纠正步骤。
   // 纠正链路的同类约束由 tests/review-system.test.js 覆盖。
   const api = makeApi({
-    config: { ...DEFAULT_CONFIG, model: DEFAULT_CONFIG.model, engineMode: 'laya_only' },
+    // §3.10d：默认 baseUrl 现在是空的，要真的发请求就必须显式给地址
+    config: {
+      ...DEFAULT_CONFIG,
+      baseUrl: 'http://127.0.0.1:8787',
+      model: DEFAULT_CONFIG.model,
+      engineMode: 'laya_only',
+    },
     fetchImpl: capturing,
   });
   const orchestrator = makeOrchestrator({ api, model: DEFAULT_CONFIG.model, engineMode: 'laya_only' });

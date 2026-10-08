@@ -12,6 +12,7 @@
 
 import { SCORE_QUESTION_IDS, clampScore, toDataUri } from '../core/protocol.js';
 import { buildReviewPrompt, REVIEW_SYSTEM_PROMPT } from '../core/prompts.js';
+import { guardRawAnswers } from '../core/scoreGuard.js';
 import { errorFor } from '../data/copy.js';
 
 const SCORE_KEY_SET = new Set(SCORE_QUESTION_IDS);
@@ -205,6 +206,7 @@ export function parseReviewScores(rawText, lookIds) {
 
   const allow = new Set(ids);
   const out = {};
+  const accepted = [];
   for (const row of candidates) {
     if (!row || typeof row !== 'object') continue;
     const lookId = typeof row.lookId === 'string' ? row.lookId : '';
@@ -215,9 +217,32 @@ export function parseReviewScores(rawText, lookIds) {
       if (value !== null) scores[key] = value;
     }
     // 只有 6 维齐全才接受这一套：半套分数会让排序在不同维度上取不同来源
-    if (Object.keys(scores).length === SCORE_QUESTION_IDS.length) out[lookId] = scores;
+    if (Object.keys(scores).length !== SCORE_QUESTION_IDS.length) continue;
+    accepted.push(row);
+    out[lookId] = scores;
   }
   if (!Object.keys(out).length) throw errorFor('parse');
+
+  /**
+   * SPEC §5.6 · 纠正分同样要先审计**原始分**再 clamp。
+   *
+   * 位置刻意放在"筛掉缺维/未知 lookId"之后、且用**原始** `row` 取值：
+   * 纠正这条路也是模型输出，同样可能整轮量纲错配（按 1–10 给分），
+   * 不审计就会集体贴边成 5 分，用户看到一排名不副实的满分。
+   *
+   * 注意返回的仍是上面已 clamp 的 `out` —— 审计只负责"这轮可不可信"，
+   * 不改变"单条越界就夹制"这个既有契约（§1.3 的宽松解析）。
+   */
+  const rawForAudit = [];
+  for (const row of accepted) {
+    for (const key of SCORE_QUESTION_IDS) rawForAudit.push({ id: key, score: pickDimension(row, key) });
+  }
+  const guard = guardRawAnswers(rawForAudit);
+  if (guard.reject) {
+    const err = errorFor('parse');
+    err.upstreamDetail = guard.detail;
+    throw err;
+  }
   return out;
 }
 

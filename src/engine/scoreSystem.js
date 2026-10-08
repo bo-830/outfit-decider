@@ -7,6 +7,7 @@ import {
   rankLooks,
 } from '../core/protocol.js';
 import { buildScoreQuestions, buildSyntheticStateText, normalizeDescriptions, relevantScoreDimensions } from '../core/prompts.js';
+import { guardRawAnswers } from '../core/scoreGuard.js';
 import { isMeaningfulDescription } from '../core/scoring.js';
 import { ERROR_KINDS, errorInfo, invalidInputError } from '../data/copy.js';
 
@@ -35,6 +36,19 @@ export function makeScoreSystem({ api, model } = {}) {
 
     /** 逐条结果 → results Map；两条路径（批处理 / 逐条）共用同一套解析与失败语义。 */
     const recordAnswer = (lookId, answers, meta = {}) => {
+      /**
+       * SPEC §5.6 · 先审计**原始分**再解析。
+       *
+       * 必须在 `buildScoreAnswers` 之前：那一步内部会 `clampScore`，
+       * 把 8 夹成 5、-3 夹成 0 —— 一旦走完，越界证据就没了，
+       * 模型整轮按 1–10 打分时用户会看到一堆贴边的 5 分却以为是真结果。
+       * 比例超阈值即判 parse（可重试），而不是照单全收。
+       */
+      const guard = guardRawAnswers(answers);
+      if (guard.reject) {
+        results.set(lookId, { ok: false, kind: 'parse', detail: guard.detail });
+        return;
+      }
       const byId = buildScoreAnswers(answers);
       const scores = {};
       const confidences = {};

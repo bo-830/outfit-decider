@@ -837,20 +837,37 @@ async function main() {
         }
       }
 
-      if (state.mockDedicated) {
-        try {
-          await setInputValue(page, 'engine-baseurl', mockBase);
-          state.baseUrlInjected = true;
-        } catch (err) {
-          state.baseUrlInjected = false;
-          report.stepErrors.push(`engine-baseurl input unavailable: ${err.message}`);
-        }
-      } else {
-        state.baseUrlInjected = false; // 用 App 默认的 127.0.0.1:8787，走最真实的默认路径
+      /**
+       * SPEC §3.10d：App 的 `baseUrl` 默认值是**空**的（故意 —— 默认 127.0.0.1 对真机
+       * 是错的地址，而且电脑 IP 会变）。所以门禁**必须显式注入**本轮 mock 的地址，
+       * 不能再依赖"回落到 127.0.0.1:8787"那条老路径。
+       *
+       * 注入失败必须**大声失败**：以前它会静默回落，于是 baseUrl 为空却仍然
+       * 记为已注入（假证据），下游断言拿到的是一轮根本没发出请求的运行。
+       */
+      try {
+        await setInputValue(page, 'engine-baseurl', mockBase);
+        state.baseUrlInjected = true;
+      } catch (err) {
+        state.baseUrlInjected = false;
+        report.stepErrors.push(`FATAL engine-baseurl 注入失败（baseUrl 默认为空，不能回落）: ${err.message}`);
+      }
+      if (!state.baseUrlInjected) {
+        throw new Error('engine-baseurl 注入失败：baseUrl 默认是空值，没有可回落的默认地址');
       }
 
-      await setInputValue(page, 'engine-apikey', API_KEY_SENTINEL);
-      state.keyEntered = true;
+      /**
+       * SPEC §3.9c v1.7：产品默认档已改为 `multimodal_only`（Laya 降级为可选实验），
+       * 而那一档需要**能看图的模型**才能出分。本轮验收用 mock 只提供决策端点，
+       * 所以必须显式选「仅本地直接打分」这一档，否则 System One 根本不会产出六维分，
+       * #2/#3/#10 会集体红（实测就是这样发现的）。
+       *
+       * 这一步也顺带覆盖了"实验档可选"这个新行为。
+       */
+      await clickTestId(page, 'engine-mode-laya-only');
+      await sleep(300);
+
+      await setInputValue(page, 'engine-apikey', API_KEY_SENTINEL);      state.keyEntered = true;
       await clickTestId(page, 'btn-save-key');
       await sleep(400);
       state.keyStorageAfterSave = await pollStorage(page, { attempts: 10, intervalMs: 400, match: 'od.apikey.v1' });

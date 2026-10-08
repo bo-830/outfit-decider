@@ -9,6 +9,7 @@ import LookGrid from '../components/LookGrid.jsx';
 import PrimaryButton from '../components/PrimaryButton.jsx';
 import QuestionPicker from '../components/QuestionPicker.jsx';
 import SectionLabel from '../components/SectionLabel.jsx';
+import ShotGuide from '../components/ShotGuide.jsx';
 import StateChips from '../components/StateChips.jsx';
 import SystemModeSelector from '../components/SystemModeSelector.jsx';
 
@@ -81,6 +82,10 @@ export default function CaptureScreen({
         </View>
 
         <LookGrid artifacts={artifacts} onPick={onPickImages} onRemove={onRemoveLook} busy={pickBusy} />
+
+        {/* §5.7 拍摄引导：紧贴选图区，因为照片质量直接决定分数可信度。
+            逆光、只拍半身、镜子脏会让分数明显偏低，而用户会误以为是模型不准。 */}
+        <ShotGuide />
 
         {/* 两个引擎是并列的：跑哪个由用户在这里定，而不是被 CTA 写死成"先快速评分" */}
         <View style={styles.block}>

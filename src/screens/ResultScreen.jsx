@@ -7,6 +7,7 @@ import { SANS } from '../ui/platform';
 import EmptyState from '../components/EmptyState.jsx';
 import EngineBadge from '../components/EngineBadge.jsx';
 import ErrorBanner from '../components/ErrorBanner.jsx';
+import FeedbackBar from '../components/FeedbackBar.jsx';
 import NameplateRow from '../components/NameplateRow.jsx';
 import ProgressCard from '../components/ProgressCard.jsx';
 import ResultCard from '../components/ResultCard.jsx';
@@ -30,6 +31,8 @@ export default function ResultScreen({
   staleHint = false,
   onRerun,
   engineMode = null,
+  feedback = [],
+  onFeedback,
 }) {
   const insets = useSafeAreaInsets();
   // SPEC §3.13b：优先 System One；只跑了深度分析时回落到 System Two 的报告，
@@ -37,7 +40,14 @@ export default function ResultScreen({
   const ranked = selectResultLooks(flow);
   const quickRanked = selectRankedLooks(flow);
   const deepOnly = !quickRanked.length && ranked.length > 0;
+  /**
+   * §3.13c：只有"还没有任何结果可看"的阶段才该用进度页挡住用户。
+   * `deep_enriching` 表示快速结果已经在了、深度报告在后台补 —— 必须**继续显示结果**，
+   * 否则就退回成"干等半分钟"（这正是第3条要解决的问题）。
+   */
   const running = flow.phase === 'describing' || flow.phase === 'scoring' || flow.phase === 'deep_running';
+  /** 深度报告还在后台生成：结果页给一个**非阻塞**的小提示，而不是整页进度。 */
+  const enriching = flow.phase === 'deep_enriching' && ranked.length > 0;
   const focusLookId = expandedLookId || (ranked[0] ? ranked[0].lookId : null);
   const deepReports = flow.deep || {};
   const scoredCount = ranked.filter((look) => look.overall !== null && look.overall !== undefined).length;
@@ -92,6 +102,15 @@ export default function ResultScreen({
         />
       ) : null}
       {running ? <ProgressCard stage={flow.phase === 'deep_running' ? 'deep' : 'scoring'} done={0} total={artifacts.length} /> : null}
+
+      {/* §3.13c：深度报告在后台生成时给**非阻塞**提示 —— 结果已经能看了，别挡着 */}
+      {enriching ? (
+        <View testID="deep-enriching-note" style={styles.enrichingNote}>
+          <Text style={styles.enrichingText}>
+            深度分析还在后台跑（约 20–40 秒）。你可以先看下面的快速排名，报告好了会自动补上。
+          </Text>
+        </View>
+      ) : null}
 
       {quick ? (
         <EngineBadge
@@ -168,6 +187,17 @@ export default function ResultScreen({
         </View>
       )}
 
+      {/* §5.7 反馈回路：只收集"最后穿了哪套"这一个选择。
+          目的：判断哪个打分档位真的更可靠（此前唯一依据是人工对照 4 组照片，样本太小）。
+          隐私：只存文字与选择，不存照片、不上传。 */}
+      {ranked.length && typeof onFeedback === 'function' ? (
+        <FeedbackBar
+          lookIds={ranked.map((look) => look.lookId)}
+          current={feedback}
+          onFeedback={onFeedback}
+        />
+      ) : null}
+
       <Text style={styles.footnote}>分数只反映照片里看得见的东西，看不清的地方不会瞎猜。</Text>
     </ScrollView>
   );
@@ -217,4 +247,16 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
   },
   deepOnlyText: { fontFamily: SANS, fontSize: font.small, color: colors.textDim, lineHeight: 20 },
+  // §3.13c：深度报告后台生成中的非阻塞提示（同样是中性说明，不是错误也不是加载阻塞）
+  enrichingNote: {
+    marginHorizontal: layout.padX,
+    marginBottom: space.md,
+    paddingVertical: space.sm,
+    paddingHorizontal: space.md,
+    borderRadius: radius.md,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  enrichingText: { fontFamily: SANS, fontSize: font.small, color: colors.textDim, lineHeight: 20 },
 });

@@ -6,7 +6,10 @@
 版本：v1.6（v1 = Phase 0 冻结；v1.1 §2.1 三个设置页 testID；v1.2 §7.0 门禁命令形式；
 v1.3 §3.7 describe 必须带图、§2.1 `ranked[].scores`；v1.4 §5.1 重试口径与时间预期；
 v1.5 §3.9b 多模态纠正、§3.9c 三档引擎模式；v1.6 §3.11b 批处理打分、§3.11c 设置页配置顺序；
-v1.7 §3.13b 用户自选 System One / System Two、§4.1.2 挑图期间免清空、§5.5 空正文自动重投） · 适用范围：`src/core/**`、`src/data/**`、`src/engine/**`、`src/store/**`、
+v1.7 §3.13b 用户自选 System One / System Two、§4.1.2 挑图期间免清空、§5.5 空正文自动重投、
+§3.10b 直连 JEv、§3.10c 供应商与档位一致、§3.10d 本地地址不写死、
+§3.12 中转服务、§3.13c 渐进结果、§5.6 越界按比例拒绝、§5.7 反馈回路与拍摄引导、
+§3.9c-v2 Laya 降级为可选实验） · 适用范围：`src/core/**`、`src/data/**`、`src/engine/**`、`src/store/**`、
 `src/ui/theme.js`、`src/components/**`、`src/screens/**`、`App.jsx`、`tools/**`、`tests/**`
 
 ---
@@ -554,8 +557,106 @@ web 上验证请走本机适配器（§3.11）。
 因为 §7 门禁的 mock 就起在这个端口、且 `verify.mjs` 的注入可能静默失败会回退到它。
 但用户侧**必须被明确提示**：本地档位 + 环回地址会给出上面的警告（§3.10d ①）。
 
-### 3.11b 批处理打分（v1.6 新增）
+### 3.12 中转服务：把门槛降到「地址 + 一个口令」（v1.7 新增）
 
+**动机**：默认形态要求用户自己拿两把上游 Key（决策模型 + 多模态模型）并分别配置。
+对非技术用户等于不可用 —— 而目标用户是"出门前 3 分钟做决定"的普通人。
+
+**形态**：`relay/relay-server.mjs`（独立可部署进程）自己持有上游 Key，
+App 只填「地址 + 一个口令」。
+
+| | 契约 |
+|---|---|
+| `GET /health` | **免鉴权**（便于先确认地址可达）；回 `{ok, relay, upstream:{decision,vision}}` |
+| `POST /ask` | 需 `Authorization: Bearer <APP_TOKEN>`；错/缺 → **401** |
+| 请求/响应形状 | **与 App 现有契约逐字一致**（见 §1.3），App 侧不需要知道中转的存在 |
+
+- 环境变量：`RELAY_PORT`、`APP_TOKEN`、`DECISION_BASE_URL`、`DECISION_MODEL`、`DECISION_API_KEY`、
+  `VISION_BASE_URL`、`VISION_MODEL`、`VISION_API_KEY`、`VISION_MAX_TOKENS`（默认 8000）。
+- **缺 `APP_TOKEN` 必须拒绝启动**（双重门禁：`readConfig` 与 `createRelayServer`）——
+  否则会静默变成一个开放代理，等于把上游额度送人。
+- App 侧：`DEFAULT_CONFIG.relayToken`（独立持久化槽位 `od.relaytoken.v1`，与 apiKey 同级敏感）。
+  **鉴权优先级：中转口令 > 上游 Key**。同时存在时口令胜出，
+  否则会把真正的上游 Key 发给中转（既认证失败，又平白泄漏一把 Key）。
+- `redactConfig` 必须同时脱敏 `apiKey` / `visionApiKey` / `relayToken`；
+  空凭据保持空串（显示 `***` 会让人误以为已配置）。
+- 隐私不变量不变：图片只在内存中转，**不落盘、不进日志**（Key 一律脱敏）。
+- 已知限制（必须写进部署文档）：无速率限制/配额/多口令，口令泄漏 = 上游额度被白嫖，
+  生产环境应自行加限流。
+
+### 3.13c 渐进结果：先给可用的，再补精的（v1.7 新增）
+
+**动机**：深度分析实测 **15–37 秒**，而用户是在"要出门的那一刻"用它。
+「两个都要」模式下如果先扣住结果页等深度分析，用户就要对着进度页干等半分钟。
+
+**契约**：`FLOW_PHASES` 新增 **`deep_enriching`**，与 `deep_running` 语义严格区分：
+
+| phase | 含义 | 界面 |
+|---|---|---|
+| `deep_running` | **还没有任何结果可看** | 必须显示进度页（用户只能等） |
+| `deep_enriching` | 快速结果已可看，深度报告后台补 | **继续显示排名** + 非阻塞提示（`deep-enriching-note`） |
+
+- `RUN_DEEP_START` 的落点判据是**有没有现成的快速结果**（`state.quick`），
+  而不是调用方传了什么 —— 只要 quick 已在就不该再拿进度页挡住用户。
+- `DEEP_FAIL`：**已有快速结果时不得顶成错误页**（退回 `quick_done`，错误由结果页非阻塞提示）；
+  只有"没有快速结果"时才进 `error`。否则用户正看着排名，深度超时会把整页换成错误页，
+  让人以为快速结果也丢了。
+- App 侧 `thenDeep` **不再 `await`**（后台跑），但必须接住失败，避免未处理的 rejection。
+
+### 5.6 分数越界必须按比例拒绝（v1.7 新增）
+
+现状（**曾有的缺陷**）：`src/core/protocol.js` 的 `clampScore` 把越界值静默夹到 0–5。
+若模型整轮按 1–10 给分，`8`→`5`、`-3`→`0`，用户看到一排名不副实的满分却毫无提示。
+
+**契约**（实现见 `src/core/scoreGuard.js`，纯逻辑）：
+
+- 审计**原始分**，必须在 `clampScore` **之前**（否则越界证据已被抹掉）。
+- `auditScores(items)` → `{ok, outliers, total, outlierCount, ratio}`；
+  `ok` 是**严格口径**（一条越界都没有才 true）。**不要用 `ok` 当拒绝条件**，
+  否则一个 5.2 也会触发整轮重试。
+- `shouldRejectScores(audit, {ratioThreshold})` → boolean，严格 `ratio > threshold`，
+  默认阈值 **0.2**。理由：6 维下 1/6≈0.167 属"轻微越界"（常见，重试不划算），
+  2/6≈0.333 才明确是量纲错配；0.2 落在两者之间。
+- `guardRawAnswers(rawAnswers)` 是给上层接线用的桥（直接吃 App 契约的 `[{id,score}]`）。
+- **接线点**：`scoreSystem.recordAnswer`（打分）与 `parseReviewScores`（纠正）。
+  纠正那条要先筛掉"缺维 / 未知 lookId"再审计，否则会改变既有丢弃语义。
+- 判为拒绝时**报 `parse`**（可重试），而不是照单全收。
+- 单条越界仍按 §1.3 宽松解析夹制 —— 审计只决定"这轮可不可信"，不改变单条契约。
+
+### 5.7 反馈回路与拍摄引导（v1.7 新增）
+
+**反馈回路**（`src/core/feedback.js`，纯逻辑）：
+动机 —— 判断"某个打分档位是否可靠"此前只能靠人工对照 **4 组**照片，样本太小。
+
+- `buildFeedback({lookId, verdict, scoreSnapshot, engineMode, systemMode, at})`；
+  `FEEDBACK_VERDICTS = ['wore','not_wore','skipped']`，非法 verdict → `null`。
+- `parseFeedbackList` / `serializeFeedbackList` / `feedbackSummary` / `stripImages`。
+- 存储键 `od.feedback.v1`；同一个 lookId **只保留最新一次**回答（重复点击不污染统计）。
+- **隐私硬约束**：只存文字与选择，**绝不存图片 / base64、绝不上传**。
+  `stripImages` 是这条不变量的执行点，落盘前再走一次兜底；测试必须断言它有效。
+
+**拍摄引导**（`src/components/ShotGuide.jsx` + `src/data/shotTips.js`）：
+动机 —— 逆光、只拍半身、镜子脏会让分数明显偏低，而用户会误以为是模型不准；
+**投入产出比最高的改进**，因为它同时改善准确率与信任。
+- 上传页可折叠面板（`shot-guide` / `shot-guide-toggle`），默认收起，展开列出 6 条**具体可执行**动作
+  （反例"注意光线"是废话；好例子"背对窗户站，让光从正面打到身上"）。
+
+### 3.9c-v2 Laya 降级为可选实验（v1.7 变更）
+
+依据实测（`laya-service/README.md`）：`laya_only` 单独排序 **2/4**（接近掷硬币，
+且失败的两组正是最典型的场合适配错误）；`laya_review` **4/4**，但收益来自多模态纠正，
+代价是用户必须常驻一个本地服务。
+
+**结论**：Laya 的价值必须靠另一个模型兑现，因此不该让"跑一个本地服务"成为**默认前提**。
+
+- `DEFAULT_CONFIG.engineMode` 从 `laya_review` 改为 **`multimodal_only`**。
+- `laya_only` / `laya_review` 保留为**实验档**，由 `EXPERIMENTAL_ENGINE_MODES` 标注，
+  设置页显示「实验性」标签（警告色，不是强调色 —— 避免看起来像推荐项）。
+- 默认档**不得**是实验档（有单测盯着）。
+- 门禁 `tools/verify.mjs` 因为 mock 只提供决策端点，必须**显式选** `engine-mode-laya-only`
+  才能验证六维分（默认档需要视觉端点，会不出分）。
+
+### 3.11b 批处理打分（v1.6 新增）
 **动机**：`scoreSystem` 原本对每套发一次 `/ask`（4 套 = 4 次往返）。Laya 的
 `/v1/systemone/batch` 能在**单次 forward pass** 内 collate 多行，因此值得合并。
 

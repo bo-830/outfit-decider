@@ -144,6 +144,8 @@ function orchestrator(dual, engineMode, configPatch = {}) {
   const api = makeApi({
     config: {
       ...DEFAULT_CONFIG,
+      // §3.10d：默认 baseUrl 是空的，测试要打请求就必须显式给地址
+      baseUrl: 'http://127.0.0.1:8787',
       visionBaseUrl: 'https://vision.test/v1',
       visionModel: 'vision-test',
       visionApiKey: 'sk-vision-secret',
@@ -328,7 +330,11 @@ test('multimodal_only：多模态失败 → 直接报错（没有可回退的分
 
 test('未配置多模态端点 → 报 vision_unconfigured，并给出配置指引（不静默降级）', async () => {
   const dual = makeDualFetch({ reviewJson: reviewedJson([reviewRow('look1', 4.0)]) });
-  const api = makeApi({ config: { ...DEFAULT_CONFIG, visionBaseUrl: '', visionModel: '' }, fetchImpl: dual.fetchImpl });
+  // 决策端点要给地址（§3.10d 默认是空的）；这里要测的是**视觉**没配置，不是决策没配置
+  const api = makeApi({
+    config: { ...DEFAULT_CONFIG, baseUrl: 'http://127.0.0.1:8787', visionBaseUrl: '', visionModel: '' },
+    fetchImpl: dual.fetchImpl,
+  });
   const quick = await makeOrchestrator({ api, model: 'laya', engineMode: 'laya_review' }).runQuick({
     artifacts: artifacts(), userState: STATE, question: QUESTION,
   });
@@ -342,7 +348,13 @@ test('visionServerSide=true → 判据就绪，且纠正改走决策通道带图
   // App 侧没有 visionBaseUrl/visionModel。这里直测两个单元契约，
   // 而不是走整条 orchestrator（替身的通道识别会干扰，见下方注释）。
   const ready = makeApi({
-    config: { ...DEFAULT_CONFIG, visionBaseUrl: '', visionModel: '', visionServerSide: true },
+    config: {
+      ...DEFAULT_CONFIG,
+      baseUrl: 'http://127.0.0.1:8787',
+      visionBaseUrl: '',
+      visionModel: '',
+      visionServerSide: true,
+    },
     fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({}) }),
   });
   // ① 判据必须认 visionServerSide，否则设置页解锁了、纠正却会放弃（真实发生的分裂）
@@ -355,7 +367,13 @@ test('visionServerSide=true → 判据就绪，且纠正改走决策通道带图
   // ③ 服务端形态下纠正必须经决策通道、且**必须带图**（否则服务端也无从判断）
   const calls = [];
   const api = makeApi({
-    config: { ...DEFAULT_CONFIG, visionBaseUrl: '', visionModel: '', visionServerSide: true },
+    config: {
+      ...DEFAULT_CONFIG,
+      baseUrl: 'http://127.0.0.1:8787',
+      visionBaseUrl: '',
+      visionModel: '',
+      visionServerSide: true,
+    },
     fetchImpl: async (url, init) => {
       const body = JSON.parse(init.body || '{}');
       calls.push({ url: String(url), body });
@@ -449,9 +467,35 @@ test('parseReviewScores：6 维不齐 / 越界 / 未知 lookId 一律丢弃（�
     (err) => err.kind === 'parse',
   );
 
-  // 越界分数被钳制到 [0,5] 且保留 1 位小数
-  const clamped = parseReviewScores(JSON.stringify({ scores: [reviewRow('look1', 9)] }), ['look1']);
+  /**
+   * 个别越界仍按 §1.3 宽松解析**夹制**（不是整轮拒绝）。
+   *
+   * 注意这里刻意只让 **overall_score 一个维度**越界（其余 4.0）：
+   * `reviewRow(id, base)` 是"把 base 复制给 6 个维度"，直接传 5.2 会让 6/6 全越界，
+   * 触发 §5.6 的整轮拒绝 —— 那是另一条测试要覆盖的语义。
+   * 1/6 ≈ 0.167 低于 20% 阈值，所以这一轮照常产出、值被夹到 [0,5]。
+   */
+  const oneOutlier = { ...reviewRow('look1', 4.0), overall_score: 5.2 };
+  const clamped = parseReviewScores(JSON.stringify({ scores: [oneOutlier] }), ['look1']);
   assert.equal(clamped.look1.overall_score, 5);
+  assert.equal(clamped.look1.aesthetic_score, 4, '其余维度不受影响');
+});
+
+test('parseReviewScores：整轮量纲错配（都按 1–10 打分）必须报 parse，而不是集体贴边成 5 分', () => {
+  // 实测动机：模型整轮按 1–10 给分时，clampScore 会把 6 个维度全夹成 5，
+  // 用户看到一排名不副实的满分却毫无提示。§5.6 要求在 clamp 前按比例识别这种错配。
+  const misScaled = reviewRow('look1', 9);
+  const err = (() => {
+    try {
+      parseReviewScores(JSON.stringify({ scores: [misScaled] }), ['look1']);
+      return null;
+    } catch (caught) {
+      return caught;
+    }
+  })();
+  assert.ok(err, '整轮越界必须抛出，不能静默夹制');
+  assert.equal(err.kind, 'parse');
+  assert.match(String(err.upstreamDetail || ''), /越界比例/, '要说明原因，便于排查量纲问题');
 });
 
 test('parseReviewScores：非 JSON / 空 JSON 必须抛 parse', () => {
@@ -572,7 +616,14 @@ test('纠正：模型只回了空 content（推理吃光预算）→ 判 parse �
     };
   };
   const api = makeApi({
-    config: { ...DEFAULT_CONFIG, visionBaseUrl: 'https://v.test/v1', visionModel: 'reasoning-model' },
+    config: {
+      ...DEFAULT_CONFIG,
+      // §3.10d：默认 baseUrl 是空的，这里必须显式给决策端点地址，
+      // 否则 runQuick 会在打分阶段就以"没配置"失败，测到的就不是"纠正返回空"了
+      baseUrl: 'http://127.0.0.1:8787',
+      visionBaseUrl: 'https://v.test/v1',
+      visionModel: 'reasoning-model',
+    },
     fetchImpl,
   });
   const quick = await makeOrchestrator({ api, model: 'laya', engineMode: 'laya_review' }).runQuick({

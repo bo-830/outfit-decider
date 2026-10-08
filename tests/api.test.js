@@ -5,25 +5,30 @@ import assert from 'node:assert/strict';
 import {
   DEFAULT_CONFIG,
   ENGINE_MODES,
+  EXPERIMENTAL_ENGINE_MODES,
   classifyError,
   makeApi,
   normalizeBaseUrl,
   redactConfig,
 } from '../src/engine/api.js';
 import { ERRORS, UNRECOGNIZABLE } from '../src/data/copy.js';
+import { makeScoreSystem } from '../src/engine/scoreSystem.js';
+import { SCORE_QUESTION_IDS } from '../src/core/protocol.js';
 import { makeFetchMock } from './helpers/fetchMock.js';
 
 /**
- * 测试用配置：显式声明走「JEv 云端 + API Key」。
+ * 测试用配置：显式声明「JEv 云端 + API Key + 一个具体地址」。
  *
- * 为什么必须显式写 `mode: 'jev'`：DEFAULT_CONFIG 的默认 mode 是 `laya`
- * （默认 baseUrl 是本机适配器，不带出站 Key）。本文件大量用例在断言
- * `Authorization: Bearer …`，依赖的是"云端会带 Key"这个语义，
- * 不该靠默认值碰巧成立 —— 默认值一改就会连带变红（实测踩过）。
+ * 为什么每一项都要显式写：DEFAULT_CONFIG 的 baseUrl 现在是**空**的（§3.10d：
+ * 默认 127.0.0.1 对真机是错的，故意不给默认值），mode 默认 `laya`。
+ * 本文件大量用例在断言 URL 与 `Authorization: Bearer …`，
+ * 依赖的是"有地址、云端会带 Key"这个语义，不该靠默认值碰巧成立
+ * —— 默认值一改就连带变红（实测已经踩过两次）。
  */
 const config = (overrides = {}) => ({
   ...DEFAULT_CONFIG,
   mode: 'jev',
+  baseUrl: 'http://127.0.0.1:8787',
   apiKey: 'sk-secret-key',
   ...overrides,
 });
@@ -33,8 +38,9 @@ test('DEFAULT_CONFIG 与 SPEC §3.10 逐字一致', () => {
   assert.deepEqual(DEFAULT_CONFIG, {
     // 上游默认是本机适配器，所以默认 mode 必须是 laya（曾误设为 jev，与 baseUrl 矛盾）
     mode: 'laya',
-    // v1.5 §3.9c：三档引擎模式与独立的多模态通道
-    engineMode: 'laya_review',
+    // v1.7 §3.9c：默认改为 multimodal_only —— Laya 实测单独排序 2/4（接近掷硬币），
+    // 它有用要靠在后面接多模态纠正；不该让"必须跑本地服务"成为所有人的默认前提
+    engineMode: 'multimodal_only',
     visionBaseUrl: '',
     visionModel: '',
     visionApiKey: '',
@@ -44,21 +50,30 @@ test('DEFAULT_CONFIG 与 SPEC §3.10 逐字一致', () => {
     decisionUnlocked: false,
     // reasoning 模型会把预算花在 reasoning 上：4000 时实测约 1/4 深度分析返回空串
     visionMaxTokens: 8000,
-    baseUrl: 'http://127.0.0.1:8787',
+    // v1.7 §3.10d：**故意为空** —— 默认 127.0.0.1 对真机是错的（指手机自己），
+    // 且电脑局域网 IP 会变；空值迫使界面明确要求用户填
+    baseUrl: '',
     askPath: '/ask',
     healthPath: '/health',
     model: 'outfit-judge-v1',
     // SPEC §3.10b：上游协议（auto = 按主机名判断；直连 typesafe.ai 时自动用 JEv 原生协议）
     protocol: 'auto',
     apiKey: '',
+    // §3.12 中转口令：与 apiKey 同等对待（只存本机、绝不入日志/报告）
+    relayToken: '',
     timeoutMs: 120000,
     quickTimeoutMs: 20000,
   });
 });
 
-test('默认引擎模式是 laya_review（§3.9c：保留 Laya 在环，但由多模态纠正）', () => {
-  assert.equal(DEFAULT_CONFIG.engineMode, 'laya_review');
+test('默认引擎模式是 multimodal_only（§3.9c v1.7：Laya 降级为可选实验）', () => {
+  // 实测依据：laya_only 单独排序 2/4（接近掷硬币）；laya_review 4/4 但收益来自多模态纠正，
+  // 代价是必须常驻一个本地服务。既然价值要靠另一个模型兑现，就不该是默认前提。
+  assert.equal(DEFAULT_CONFIG.engineMode, 'multimodal_only');
   assert.deepEqual(ENGINE_MODES, ['laya_only', 'laya_review', 'multimodal_only']);
+  // 两个 Laya 档位仍是合法取值，但被标为实验性
+  assert.deepEqual(EXPERIMENTAL_ENGINE_MODES, ['laya_only', 'laya_review']);
+  assert.ok(!EXPERIMENTAL_ENGINE_MODES.includes(DEFAULT_CONFIG.engineMode), '默认档不能是实验档');
 });
 
 test('normalizeBaseUrl：补 scheme、去尾斜杠、兼容局域网写法', () => {
@@ -478,6 +493,77 @@ test('§5.4b 错误详情：多模态端点的失败原因同样要透传（视�
   assert.equal(caught.kind, 'auth');
   const info = classifyError(caught);
   assert.match(info.message, /Incorrect API key/, '必须能看出是 Key 不对');
+});
+
+test('§3.12 中转：口令优先于上游 Key（避免把上游 Key 当口令发出去）', async () => {
+  /**
+   * 场景：用户从中转切回直连、或反过来，配置里可能同时留着 `relayToken` 与 `apiKey`。
+   * 必须让**口令胜出** —— 否则会把真正的上游 Key 发给中转：
+   * 既认证失败，又平白泄漏了一把上游 Key。
+   */
+  const seq = sequenceFetch([200]);
+  const api = makeApi({
+    config: config({ relayToken: 'relay-token-xyz', apiKey: 'sk-upstream-secret' }),
+    fetchImpl: seq.fetchImpl,
+  });
+  await api.ask({ state: 's', questions: QUESTIONS });
+  assert.equal(seq.calls[0].init.headers.Authorization, 'Bearer relay-token-xyz');
+});
+
+test('§3.12 中转：没有口令时才回落到上游 Key', async () => {
+  const seq = sequenceFetch([200]);
+  const api = makeApi({
+    config: config({ relayToken: '', apiKey: 'sk-upstream-secret' }),
+    fetchImpl: seq.fetchImpl,
+  });
+  await api.ask({ state: 's', questions: QUESTIONS });
+  assert.equal(seq.calls[0].init.headers.Authorization, 'Bearer sk-upstream-secret');
+});
+
+test('§3.12 隐私：relayToken 必须与 apiKey 一样被脱敏', () => {
+  const redacted = redactConfig({ apiKey: 'sk-a', visionApiKey: 'sk-b', relayToken: 'relay-c', baseUrl: 'x' });
+  assert.equal(redacted.apiKey, '***');
+  assert.equal(redacted.visionApiKey, '***');
+  assert.equal(redacted.relayToken, '***', '中转口令泄漏等于上游额度被白嫖，必须脱敏');
+  assert.equal(redacted.baseUrl, 'x', '非机密字段不该被改动');
+});
+
+test('§3.12 隐私：空凭据保持空字符串（不显示 *** 误导用户以为已配置）', () => {
+  const redacted = redactConfig({ apiKey: '', visionApiKey: '', relayToken: '' });
+  assert.equal(redacted.apiKey, '');
+  assert.equal(redacted.visionApiKey, '');
+  assert.equal(redacted.relayToken, '');
+});
+
+test('§5.6 越界检测：整轮量纲错配必须报 parse，而不是照单全收', async () => {
+  /**
+   * 模型按 1–10 打分 → 6 个维度全部越界。
+   * 期望：判 parse 失败（可重试），而不是让 8→5、-3→0 静默贴边，
+   * 让用户看到一排名不副实的满分却毫无提示。
+   *
+   * 注意 `scoreLooks` 在**全部**套都失败时会抛错（不是返回 failed 列表），
+   * 所以这里断言的是 reject。
+   */
+  const misScaled = SCORE_QUESTION_IDS.map((id) => ({ id, type: 'score', score: 9, confidence: 0.5 }));
+  const api = makeApi({
+    config: config(),
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ model: 'm', answers: misScaled, usage: {} }),
+    }),
+  });
+  const system = makeScoreSystem({ api, model: 'm' });
+  await assert.rejects(
+    () => system.scoreLooks({
+      artifacts: [{ lookId: 'look1', mime: 'image/jpeg', base64: 'AAAA' }],
+      descriptions: { look1: '整体风格：简约；上衣：衬衫；下装：西裤；鞋履：皮鞋；配饰：无；身材视觉效果：匀称；其他细节：无' },
+      userState: { occasion: ['interview'], weather: [], style: [], note: '' },
+      question: { builtinId: null, text: '' },
+    }),
+    (err) => err.kind === 'parse',
+    '整轮越界必须判 parse（量纲错配），不能静默夹制后当作正常结果',
+  );
 });
 
 test('§5.4b 错误详情：绝不把 Key 回显出来（脱敏）', async () => {

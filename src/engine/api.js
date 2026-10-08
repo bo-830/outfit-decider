@@ -20,8 +20,15 @@ export const DEFAULT_CONFIG = {
    * 之前默认写成 `jev` 而 baseUrl 指向本机 —— 两者矛盾（§3.10b 的一致性检查会报出来）。
    */
   mode: 'laya',
-  // SPEC §3.9c 三档引擎模式：laya_only ｜ laya_review（默认）｜ multimodal_only
-  engineMode: 'laya_review',
+  /**
+   * SPEC §3.9c 三档引擎模式。
+   *
+   * 默认 **`multimodal_only`**（v1.7 变更，原为 `laya_review`）：Laya 实测单独排序
+   * 接近掷硬币（2/4），它保留在环里只有配了多模态纠正才有用（4/4）。
+   * 既然它的价值必须靠另一个模型兑现，就不该让"跑一个本地服务"成为默认前提 ——
+   * 两个 Laya 档位降级为**可选实验**，需要用户显式选择。
+   */
+  engineMode: 'multimodal_only',
   // 多模态端点与决策模型**分开配置**：laya_review 下「谁看图」和「谁打分」是两个不同的服务。
   visionBaseUrl: '',
   visionModel: '',
@@ -39,7 +46,15 @@ export const DEFAULT_CONFIG = {
   // 返回空串，提到 8000 后 5/5 通过（见 tools 里的诊断脚本）。
   // 深度分析要输出 ranking+details(每套5维)+conclusion，本身就比纠正更长。
   visionMaxTokens: 8000,
-  baseUrl: 'http://127.0.0.1:8787',
+  /**
+   * SPEC §3.10d · **故意为空**。
+   *
+   * 以前默认 `http://127.0.0.1:8787`（本机适配器）—— 对真实手机是**错的地址**
+   * （指手机自己），而且电脑的局域网 IP 还会随路由器变化，写死只会误导用户。
+   * 空值让界面必须明确要求用户填（`providerMismatch` 会提示）；宁可空着，也不要给错的。
+   * 演示/门禁由 `tools/verify.mjs` **显式注入**地址，注入失败会大声失败而不是回落到这里。
+   */
+  baseUrl: '',
   askPath: '/ask',
   healthPath: '/health',
   model: 'outfit-judge-v1',
@@ -52,6 +67,16 @@ export const DEFAULT_CONFIG = {
    */
   protocol: 'auto',
   apiKey: '',
+  /**
+   * SPEC §3.12 · 中转模式（可选）。
+   *
+   * 动机：默认形态要求用户自己拿两把上游 Key（决策模型 + 多模态模型），
+   * 对非技术用户等于不可用。中转模式下，两把 Key 由**中转服务**持有，
+   * App 只填「地址 + 一个口令」。
+   *
+   * `relayToken` 只存本机，绝不写进代码/日志/验证报告（与 apiKey 同等待遇）。
+   */
+  relayToken: '',
   // 深度分析走 decision 通道（visionServerSide 形态），所以这条超时必须够长：
   // 实测 15–37s，且 reasoning 预算提高后偏慢的一侧更常见。
   timeoutMs: 120000,
@@ -60,6 +85,13 @@ export const DEFAULT_CONFIG = {
 
 /** SPEC §3.9c 合法取值（UI 与校验共用，避免两处硬编码漂移）。 */
 export const ENGINE_MODES = ['laya_only', 'laya_review', 'multimodal_only'];
+
+/**
+ * 需要用户自备本地 Laya 服务的档位（**实验性**）。
+ * 实测：`laya_only` 单独排序 2/4 接近掷硬币；`laya_review` 4/4 但收益来自多模态纠正，
+ * 代价是必须常驻一个本地服务。所以默认不使用它们，界面上如实标注"实验性"。
+ */
+export const EXPERIMENTAL_ENGINE_MODES = ['laya_only', 'laya_review'];
 
 const HEALTH_TIMEOUT_MS = 8000;
 const REDACTED_API_KEY = '***';
@@ -164,8 +196,18 @@ export function makeApi({ config, fetchImpl = globalThis.fetch } = {}) {
     }
 
     const headers = { 'Content-Type': 'application/json' };
-    // JEv 必须带 Bearer Key；generic 沿用原口径（mode==='jev' 时带上配置的 Key）
-    if (isJev || cfg.mode === 'jev') {
+    /**
+     * 鉴权优先级（§3.12）：**中转口令优先**，其次才是直连上游的 Key。
+     *
+     * 中转模式下上游的两把 Key 在服务端，App 手里只有口令 —— 两者不该同时出现，
+     * 但万一用户从直连切到中转、旧 Key 还留在配置里，必须让口令胜出，
+     * 否则会把上游 Key 当成口令发给中转（既认证失败，又平白泄漏了一把 Key）。
+     */
+    const relayToken = typeof cfg.relayToken === 'string' ? cfg.relayToken.trim() : '';
+    if (relayToken) {
+      headers.Authorization = `Bearer ${relayToken}`;
+    } else if (isJev || cfg.mode === 'jev') {
+      // JEv 必须带 Bearer Key；generic 沿用原口径（mode==='jev' 时带上配置的 Key）
       const key = typeof cfg.apiKey === 'string' ? cfg.apiKey.trim() : '';
       if (key) headers.Authorization = `Bearer ${key}`;
     }
@@ -510,7 +552,11 @@ export function makeApi({ config, fetchImpl = globalThis.fetch } = {}) {
     };
 
     const headers = { 'Content-Type': 'application/json' };
-    if (cfg.mode === 'jev') {
+    // 与 askOnce 同口径：中转口令优先（§3.12）
+    const batchRelayToken = typeof cfg.relayToken === 'string' ? cfg.relayToken.trim() : '';
+    if (batchRelayToken) {
+      headers.Authorization = `Bearer ${batchRelayToken}`;
+    } else if (cfg.mode === 'jev') {
       const key = typeof cfg.apiKey === 'string' ? cfg.apiKey.trim() : '';
       if (key) headers.Authorization = `Bearer ${key}`;
     }
@@ -664,11 +710,20 @@ export function classifyError(err) {
   };
 }
 
-/** SPEC §3.10 · 去掉 apiKey 的副本（写日志 / 报告 / probe 前必须过这一层）。 */
+/**
+ * SPEC §3.10 · 去掉密钥副本（写日志 / 报告 / probe 前必须过这一层）。
+ *
+ * `relayToken` 与 `apiKey`、`visionApiKey` **同等对待**：它们都是"泄漏即被白嫖/被盗用"的凭据。
+ * §3.12 的中转口令尤其危险 —— 拿到它就能用我们的上游额度。
+ */
 export function redactConfig(config) {
   const source = config && typeof config === 'object' ? config : {};
-  const apiKey = typeof source.apiKey === 'string' ? source.apiKey : '';
-  return { ...source, apiKey: apiKey ? REDACTED_API_KEY : '' };
+  const out = { ...source };
+  for (const field of ['apiKey', 'visionApiKey', 'relayToken']) {
+    const value = typeof source[field] === 'string' ? source[field] : '';
+    out[field] = value ? REDACTED_API_KEY : '';
+  }
+  return out;
 }
 
 function detectKind(err) {

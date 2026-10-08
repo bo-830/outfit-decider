@@ -24,7 +24,7 @@ node --test "tests/**/*.test.js"     # 预期 tests 89 / pass 89 / fail 0
 
 ```powershell
 # ③ 全链路验收（起 mock → expo export web → headless Chrome 390×844 冒烟 → 截图 + 报告）
-node tools/verify.mjs                # 预期 exit 0、assertions 12/12
+node tools/verify.mjs                # 预期 exit 0、assertions 14/14 + gatingExtras 2/2
 ```
 
 产物：
@@ -92,7 +92,7 @@ cmd /c "npx expo start --lan"
 4. **Android 模拟器**：它连局域网 IP 通常不通，要用宿主机别名 `http://10.0.2.2:8787`。
    `app.json` 已设 `usesCleartextTraffic: true`，所以明文 HTTP 不会被 Android 9+ 拦掉。
    **更省事的做法是 `adb reverse`**（推荐）：它把模拟器的 localhost 映射到本机，
-   于是 App 里**默认的** `127.0.0.1:8787` 直接可用，什么都不用改：
+   于是 App 的 baseUrl 填 `http://127.0.0.1:8787` 就能用（**默认值是空的**，这一格要自己填）：
    ```powershell
    foreach ($p in 8081,8787,8000) { adb reverse tcp:$p tcp:$p }   # 8081 必带，否则拉不到 bundle
    adb shell am start -a android.intent.action.VIEW -d "exp://127.0.0.1:8081" host.exp.exponent
@@ -110,7 +110,7 @@ cmd /c "npx expo start --lan"
 
 | 字段 | 模拟器 | 真机 |
 |---|---|---|
-| 决策 baseUrl | `http://127.0.0.1:8787`（**默认值，别改**） | `http://<脚本打印的LAN IP>:8787` |
+| 决策 baseUrl | **必须自己填**：`http://127.0.0.1:8787` | **必须自己填**：`http://<脚本打印的LAN IP>:8787` |
 | 决策模型名 | `outfit-judge-v1`（默认） | 同左 |
 | askPath / healthPath | `/ask`、`/health`（默认） | 同左 |
 | API Key | **留空** | **留空** |
@@ -129,7 +129,7 @@ cmd /c "npx expo start --lan"
 3. **变了就醒目打印**旧值、新值、以及"去设置页把 baseUrl 改成 http://<新IP>:8787"；
 4. 没变则安静通过（不会误报）。
 
-模拟器不受影响 —— 它走 `adb reverse`，所以 baseUrl 恒为默认的 `127.0.0.1:8787`。
+模拟器不受影响 —— 它走 `adb reverse`，baseUrl 填 `http://127.0.0.1:8787` 就一直可用（默认值是空的，别忘填）。
 
 ### 1.3 服务挂了怎么判断、怎么恢复
 
@@ -173,14 +173,112 @@ tools\start-outfit-decider.bat stop     # 收工（按 PID + 端口精确停，�
    脚本会用工作区里的 `Expo-Go-57.0.9.apk` 自动重装。
    （APK 路径与目标版本写在脚本顶部的 `EXPO_GO_APK` / `EXPO_GO_SDK`。）
 2. **模拟器里的 `127.0.0.1` 是模拟器自己**，LAN IP 通常也不通 →
-   靠 `adb reverse` 解决，这样 baseUrl 用默认值即可。
+   靠 `adb reverse` 解决，baseUrl 填 `http://127.0.0.1:8787` 即可。
 
 调试时注意：`adb shell input tap` 对**系统相册选择器**（另一个 App 的窗口）经常不生效，
 截图会一模一样；这不是 App 的问题，别据此判断点击失败。
 
 ---
 
+## 1. 先跑起来
+
+### 1.0 升级注意（v1.7：默认值变了，第一次打开必须配地址）
+
+- **默认打分档位已从「本地打分 + 多模态纠正」改为「只用多模态模型」**。
+  两个 Laya 档位现在是**实验性**（实测 `laya_only` 单独排序接近掷硬币 2/4；
+  `laya_review` 4/4 但收益来自多模态纠正，代价是必须常驻一个本地服务）。
+  它们仍可选，但界面上会标「实验性」。
+- **默认地址改为空**。以前默认 `http://127.0.0.1:8787`，那对真机是**错的地址**
+  （`127.0.0.1` 指手机自己），而且电脑的局域网 IP 会随路由器变化。
+- **所以升级后第一次打开，请先去设置页填一个地址**，否则会报「连不上决策模型地址」
+  （不是网络或模型的锅）。填写位置：
+
+  ```
+  设置 → 决策模型地址 → baseUrl：http://<电脑的局域网IP>:8787 → 点「测试连接」
+  ```
+
+  模拟器（或真机做过 `adb reverse`）填 `http://127.0.0.1:8787`。
+  **两条路任选**：下面「中转服务：只填地址 + 一个口令」一节（服务端持 Key，你只填地址 + 口令），
+  或 §2 自己配上游（自己拿两把 Key）。
+
+### 1.00 三个顺手的功能
+
+**拍摄引导（上传页）** —— 标题行「拍摄引导」默认收起，点一下展开，里面是 6 条**当场能做的动作**：
+离手机 2–3 米拍全身（头顶和鞋都要留在画面里）、背对窗户顺光拍、先擦干净镜子、
+按快门前站定 2 秒、用后置摄像头直出（关美颜/瘦身/滤镜）、清掉背景杂物。
+（testID：面板 `shot-guide`、展开/收起 `shot-guide-toggle`、展开后的条目 `shot-guide-body`。）
+
+**别跳过它**：逆光、只拍半身、镜子脏都会让分数明显偏低，而你的第一反应会是"这个模型不准"。
+半身照看不到裤子和鞋，身材比例只能靠猜；逆光下衣服的颜色和版型会糊成一片暗；
+镜子上的水渍和指纹会被当成衣服上的图案。同一套穿搭换个拍法，分数能差出档次 ——
+所以分数偏低时先照着这 6 条重拍一张再打分，再判断模型准不准。
+
+**渐进结果（选「两个都要」时）** —— 不再让你对着进度页干等 20–40 秒：
+快速排名先出来（分数、6 维、排名都在），深度报告在后台补，页面上只有一条**非阻塞**提示
+（testID `deep-enriching-note`）：「深度分析还在后台跑（约 20–40 秒）。你可以先看下面的快速排名，
+报告好了会自动补上。」提示在报告到达后自动消失；即使深度分析失败，**也不会顶掉你已经看到的排名**
+（只挂一条可关闭的错误横幅）。看到这条提示不是卡住，可以先读排名。
+
+**反馈（结果页底部）** —— 每套旁边有「穿了 / 没穿 / 没参考」
+（testID：整块 `feedback-bar`，三个按钮分别是 `feedback-{lookId}-wore` / `-not_wore` / `-skipped`）。
+它的用途是让我们判断**哪个打分档位真的更可靠**（此前只能靠人工对照 4 组照片，样本太小）。
+只记录你点的这一项（本地键 `od.feedback.v1`），**不保存照片、不上传**，记录只留在这台设备；
+同一个 lookId 以最后一次回答为准。
+
+### 1.01 分数不会突然集体贴到 5 分了
+
+以前如果模型整轮按 1–10 给分，分数会被**静默夹制**到 0–5（8 → 5、-3 → 0），
+于是你看到一排名不副实的贴边高分，还以为是真实结果。
+
+现在**打分**与**多模态纠正**两条路都会先审计**原始分**（在夹制之前）：
+
+- 越界比例**超过阈值（默认 20%）** 即判为解析失败，界面按「模型返回的内容看不懂，请重试一次」
+  处理并给出**重试**按钮，而不是照单全收。注意 `parse` 属于**不自动重投**的错误（见 §3.1），
+  重试得你自己点。
+- 阈值是"严格大于"：6 维下 1 个越界（≈16.7%）不触发，要**成片越界**（2 个及以上，≈33%）才判失败；
+  恰好等于 0 或 5 不算越界。
+- **个别轻微越界（如 5.2）仍按宽松解析夹到 0–5**，不会为一个毛刺把整轮作废。
+
+自己实现对端时请直接返回 0–5 的量表；想复现这个行为，让对端把 6 维分数按 1–10 返回即可。
+
 ## 2. 接你自己的决策模型
+
+### 2.0.0 中转服务：只填「地址 + 一个口令」（推荐给非技术用户）
+
+如果你不想让每个用户都去申请两把上游 Key，就把 **`relay/relay-server.mjs`** 部署到任意一台
+能上网的主机：中转自己持有上游 Key，App 只填「地址 + 一个口令」。
+
+```bash
+# 在中转服务端（不是手机上）：
+APP_TOKEN=<你自己定的口令> \
+DECISION_BASE_URL=https://api.typesafe.ai \
+DECISION_MODEL=jev-latest \
+DECISION_API_KEY=<决策模型 Key> \
+VISION_BASE_URL=https://api.deepseek.com/v1 \
+VISION_MODEL=deepseek-flash \
+VISION_API_KEY=<多模态 Key> \
+node relay/relay-server.mjs
+```
+
+App 设置页「或者：用中转服务」里填两项：**服务地址**（如 `https://你的中转.example.com`，
+testID `relay-baseurl`）和 **API 口令**（必须与服务端 `APP_TOKEN` 完全一致，注意首尾空格，
+testID `relay-token`）。先点「保存口令」（`btn-save-relay-token`），再点「测试中转」
+（`btn-test-relay`），下方 `relay-test-result` 会显示连接结果与真实用时。口令只存这台设备、不回显。
+
+> 上面那种 `KEY=值` 加行尾反斜杠的写法是 bash 的。**PowerShell 下要逐条 `$env:APP_TOKEN='...'` 设好，
+> 再 `node relay/relay-server.mjs`**；两套写法与环境变量全表都在 `relay/DEPLOY.md`。
+
+- `GET /health` **不需要口令**（便于探活、先确认地址通不通）；`POST /ask` 需要
+  `Authorization: Bearer <口令>`，请求与响应的形状和 §2.2 一致，所以 App 这边不用改协议。
+- `RELAY_PORT` 默认 8787（填 `0` 让系统随机分配空闲端口，启动日志会打印真实端口）。
+- **`APP_TOKEN` 缺失会拒绝启动** —— 没有口令的中转等于开放代理，上游额度会被白嫖。
+- `VISION_MAX_TOKENS` 默认 **8000**，别调小：推理模型会把预算花在 reasoning 上，
+  给小了会返回 200 但正文是空串。
+- 完整部署方式（Docker / Nginx / 托管平台）、排错表、真实验收输出见
+  [`relay/DEPLOY.md`](../relay/DEPLOY.md)（这里只留最少要记住的几条，不复制它的内容）。
+- **安全提醒**：口令泄漏 = 上游额度被白嫖。中转服务自己**没有限流/配额**，
+  要给别人长期用，请在反代或平台上加限流；图片只在内存中转，不落盘、不进日志
+  （日志里的 Key / 口令 / dataUri / base64 都会脱敏）。
 
 ### 2.00 App **直连** TypeSafe JEv（没有电脑也能用）
 
@@ -389,24 +487,29 @@ cmd /c "npm run laya"                                 # ② 协议适配器 0.0.
 | 原始图片只进内存、看完即弃 | 跑一次评分后看「历史」：只有文字描述与分数，没有图片；`node tools/verify.mjs` 的报告里 `evidence.storage` 会 dump 全部 storage 键值 |
 | 不留存原图 | 图片从未写入任何 storage：报告中断言 storage 不含 `data:image` / `base64` |
 | API Key 只在你的设备上 | 原生存 `expo-secure-store`（Keystore / Keychain）；**web 端无安全存储可用，降级为 localStorage 明文，界面会明确写出「当前设备只能用明文存储」**。报告里 `keyEntered=true`（确实输入过 Key）同时 `storage` 与 `window.__OD_PROBE__` 中均无 Key 明文、`od.config.v1` 内也无 Key 字段 |
-| 不上传第三方 | 除你在设置页配置的 baseUrl 之外，App 不发任何出网请求（无埋点、无遥测） |
+| 不上传第三方 | 除你在设置页配置的 baseUrl（或中转地址）之外，App 不发任何出网请求（无埋点、无遥测） |
+| 反馈只记选择、不记照片 | 点一次结果页的「穿了」后看 storage 的 `od.feedback.v1`：只有 `lookId` / `verdict` / 分数快照 / 档位，没有 `base64` / `data:`。`tests/feedback.test.js` 有专门断言 |
+| 中转模式下上游 Key 不在手机上 | 中转的 Key 存在**服务端**环境变量里；App 只存口令（独立槽位 `od.relaytoken.v1`，与 apiKey 同级处理）。设置页的中转口令**不回显**已存值 |
 
 ---
 
 ## 6. 门禁与"红得起"（防止假绿）
 
 ```
-cmd /c "npm test"        # = node --test "tests/**/*.test.js"  → 期望 151/0
-cmd /c "npm run verify"  # = node tools/verify.mjs              → 期望 exit 0、12/12
+cmd /c "npm test"        # = node --test "tests/**/*.test.js"  → 期望 293/0
+cmd /c "npm run verify"  # = node tools/verify.mjs              → 期望 exit 0、14/14 + 2/2
 cmd /c "npm run gate"    # 两者串联
+cmd /c "node tools/verify-integration.mjs"  # 新增功能的端到端抽查（拍摄引导/反馈/中转面板）
 ```
 
 > ⚠️ **跑 `verify.mjs` 之前必须先关掉自己的 Laya 服务（8000 / 8787）。**
-> 否则 App 的默认 baseUrl（`http://127.0.0.1:8787`）会命中**你那个真实适配器**，
-> 验收脚本的请求被它截走（例如 deep 报告请求拿到的是 Laya 的 score 答案），
+> 否则验收脚本拉起 mock 时会撞端口，或你的适配器把请求截走，
 > 门禁会以一堆看不懂的方式**假红**——我为此白查了很久。
 > 关服务：`Get-NetTCPConnection -LocalPort 8787 -State Listen | % { Stop-Process -Id $_.OwningProcess -Force }`
 > （8000 同理）。verify 会自己拉起它需要的 mock。
+>
+> 注：v1.7 起 App 的 `baseUrl` **默认为空**，验收脚本会**显式注入** mock 地址；
+> 注入失败会**直接报错退出**（不再回落到 `127.0.0.1:8787`，那样会拿到一轮假绿）。
 
 一个只会在顺境下变绿的门禁等于没有门禁。本项目的验证包含**故障注入路径**（401 / 超时 / 非 JSON / 空内容 / 部分失败），
 且 `artifacts/verify-report.json` 会明示本次故障注入走的是**真实 UI 路径**还是请求拦截，不允许"用拦截伪造通过"而不说明。

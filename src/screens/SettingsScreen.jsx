@@ -3,6 +3,7 @@ import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ENGINE_MODES } from '../engine/api.js';
 import { isJevConfigured, providerMismatch, providerOptions, providerPreset } from '../core/provider.js';
+import RelayConfig from '../components/RelayConfig.jsx';
 import { colors, font, HIT, layout, radius, space } from '../ui/theme';
 import { SANS } from '../ui/platform';
 import SectionLabel from '../components/SectionLabel.jsx';
@@ -15,19 +16,28 @@ import SectionLabel from '../components/SectionLabel.jsx';
 const ENGINE_MODE_ROWS = {
   laya_only: {
     title: '本地模型直接打分',
-    sub: '快、不花钱；实测判断力偏弱',
+    sub: '实验性：实测单独排序接近掷硬币（2/4），且需要常驻一个本地服务',
+    experimental: true,
   },
   laya_review: {
     title: '本地打分 + 多模态纠正',
-    sub: '先由决策模型打分，再让能看图的模型纠正',
+    sub: '实验性：先由本地模型打分、再让能看图的模型纠正；需要常驻一个本地服务',
+    experimental: true,
   },
   multimodal_only: {
     title: '只用多模态模型',
-    sub: '不经决策模型，直接让能看图的模型判断',
+    sub: '默认：不经本地模型，直接由能看图的模型判断',
   },
 };
 
-const DEFAULT_ENGINE_MODE = 'laya_review';
+/**
+ * 默认档位 = `multimodal_only`（与 `DEFAULT_CONFIG.engineMode` 保持一致）。
+ *
+ * 为什么不再默认走 Laya：实测 Laya 单独排序 2/4（接近掷硬币），它有用要靠在后面
+ * 接一个多模态纠正（4/4）—— 既然价值必须靠另一个模型兑现，就不该让
+ * "必须跑一个本地服务"成为所有人的默认前提。
+ */
+const DEFAULT_ENGINE_MODE = 'multimodal_only';
 
 /**
  * 锁定态必须是**真的不可操作**，而不是只把颜色调灰：
@@ -120,6 +130,13 @@ export default function SettingsScreen({
   visionConn = null,
   testingVision = false,
   onOpenHelp,
+  // §3.12 中转模式：单口令接入（上游两把 Key 保存在中转服务端）
+  relayConfig = {},
+  onChangeRelay,
+  onTestRelay,
+  relayConn = null,
+  testingRelay = false,
+  onSaveRelayToken,
 }) {
   const insets = useSafeAreaInsets();
   const [draftKey, setDraftKey] = useState(config.apiKey || '');
@@ -216,6 +233,16 @@ export default function SettingsScreen({
                     <Text style={[styles.modeCardTitle, active && styles.modeCardTitleOn]}>{row.title}</Text>
                     {id === DEFAULT_ENGINE_MODE ? (
                       <Text style={[styles.modeTag, active && styles.modeTagOn]}>默认</Text>
+                    ) : null}
+                    {/* 实验档要如实标注，不能让用户以为它更"高级"：实测它需要额外常驻服务，
+                        且单独使用时排序准确率接近掷硬币（详见 ENGINE_MODE_ROWS 注释）。 */}
+                    {row.experimental ? (
+                      <Text
+                        testID={`engine-mode-${id}-experimental`}
+                        style={[styles.modeTag, styles.modeTagWarn, active && styles.modeTagOn]}
+                      >
+                        实验性
+                      </Text>
                     ) : null}
                   </View>
                   <Text style={[styles.modeCardSub, active && styles.modeCardSubOn]}>{row.sub}</Text>
@@ -475,8 +502,23 @@ export default function SettingsScreen({
           ) : null}
         </View>
 
+        {/* ── 中转模式（§3.12）：只想"填地址 + 一个口令"的用户走这里 ── */}
         <View style={styles.block}>
-          <SectionLabel title="决策模型地址" meta="本机 / 局域网都行" dim={decisionLocked} />
+          <SectionLabel title="或者：用中转服务" meta="只填地址 + 一个口令" dim={decisionLocked} />
+          <RelayConfig
+            config={relayConfig}
+            onChange={typeof onChangeRelay === 'function' ? onChangeRelay : () => {}}
+            onTest={onTestRelay}
+            testing={testingRelay}
+            conn={relayConn}
+            locked={decisionLocked}
+            onSaveToken={onSaveRelayToken}
+          />
+        </View>
+
+        {/* ── 决策模型地址（中转模式下由 RelayConfig 一并写入，见 §3.12） ── */}
+        <View style={styles.block}>
+          <SectionLabel title="决策模型地址" meta="本机 / 局域网 / 中转都行" dim={decisionLocked} />
           <Field
             label="baseUrl"
             testID="engine-baseurl"
@@ -787,6 +829,8 @@ const styles = StyleSheet.create({
     borderRadius: radius.pill,
     overflow: 'hidden',
   },
+  // "实验性"标签：用警告色而不是强调色，避免看起来像推荐项
+  modeTagWarn: { color: colors.warn, backgroundColor: colors.surfaceAlt },
   modeTagOn: { color: colors.text, backgroundColor: colors.surface },
   modeCardSub: { fontFamily: SANS, fontSize: font.small, lineHeight: 19, color: colors.textDim, marginTop: 3 },
   modeCardSubOn: { color: colors.surfaceAlt },

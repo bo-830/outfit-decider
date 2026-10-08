@@ -34,8 +34,16 @@ const jsonResponse = (payload, status = 200) => new Response(JSON.stringify(payl
   status,
   headers: { 'Content-Type': 'application/json; charset=utf-8' },
 });
+/**
+ * 引擎测试用的 api：**必须显式给一个地址**。
+ *
+ * DEFAULT_CONFIG.baseUrl 现在是空的（§3.10d：默认 127.0.0.1 对真机是错的，
+ * 故意不给默认值），而本文件几乎每个用例都要发请求。
+ * 靠默认值会让这些用例随默认值一起变红 —— 显式写出意图更稳。
+ */
+const TEST_BASE_URL = 'http://127.0.0.1:8787';
 const apiWith = (fetchImpl, config = {}) => makeApi({
-  config: { ...DEFAULT_CONFIG, ...config },
+  config: { ...DEFAULT_CONFIG, baseUrl: TEST_BASE_URL, ...config },
   fetchImpl,
 });
 
@@ -498,9 +506,13 @@ test('scoreSystem：只有 1 套可打分时不走批处理（批处理没有意
 });
 
 test('api.askBatch：批处理路径是 askPath + /batch，且受 baseUrl 支配', () => {
-  const api = makeApi({ config: { ...DEFAULT_CONFIG, askPath: '/ask' }, fetchImpl: makeFetchMock() });
+  const api = makeApi({
+    config: { ...DEFAULT_CONFIG, baseUrl: TEST_BASE_URL, askPath: '/ask' },
+    fetchImpl: makeFetchMock(),
+  });
   assert.equal(typeof api.askBatch, 'function');
   assert.equal(api.decisionConfigured(), true);
+  // §3.10d：baseUrl 为空是**默认状态**，必须被判定为"未配置"（否则会把请求发到空地址）
   const noBase = makeApi({ config: { ...DEFAULT_CONFIG, baseUrl: '' }, fetchImpl: makeFetchMock() });
   assert.equal(noBase.decisionConfigured(), false, 'baseUrl 为空即视为未配置决策模型');
 });
@@ -599,7 +611,7 @@ test('orchestrator.runQuick：全部识别失败 → invalid_input 文案（§5.
 
 test('orchestrator.runQuick：describe 全网络失败 → 抛真实错误而非 invalid_input', async () => {
   const api = makeApi({
-    config: { ...DEFAULT_CONFIG },
+    config: { ...DEFAULT_CONFIG, baseUrl: TEST_BASE_URL },
     fetchImpl: async () => { throw new TypeError('fetch failed'); },
   });
   const orchestrator = makeOrchestrator({ api, model: 'm' });

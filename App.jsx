@@ -21,7 +21,16 @@ import { errorFor, invalidInputError } from './src/data/copy.js';
 import { classifyError, DEFAULT_CONFIG, makeApi, normalizeBaseUrl } from './src/engine/api.js';
 import { makeOrchestrator } from './src/engine/orchestrator.js';
 import { appendHistory, clearHistory, loadHistory, makeHistoryRecord, removeHistory } from './src/store/history.js';
-import { isSecureStorageAvailable, loadApiKey, loadVisionKey, saveApiKey, saveVisionKey } from './src/store/secureKey.js';
+import {
+  isSecureStorageAvailable,
+  loadApiKey,
+  loadRelayToken,
+  loadVisionKey,
+  saveApiKey,
+  saveRelayToken,
+  saveVisionKey,
+} from './src/store/secureKey.js';
+import { buildFeedback, parseFeedbackList, serializeFeedbackList, stripImages } from './src/core/feedback.js';
 import CaptureScreen from './src/screens/CaptureScreen.jsx';
 import HistoryScreen from './src/screens/HistoryScreen.jsx';
 import HelpScreen from './src/screens/HelpScreen.jsx';
@@ -33,6 +42,8 @@ import { colors } from './src/ui/theme.js';
 const IS_WEB = Platform.OS === 'web';
 /** 非机密配置（服务地址 / 模型 / 模式）另存一份，API Key 只走 secureKey.js */
 const CONFIG_KEY = 'od.config.v1';
+/** §5.7 反馈回路的存储键（只存文字与选择，绝不存图片）。 */
+const FEEDBACK_KEY = 'od.feedback.v1';
 const PERSISTED_CONFIG_KEYS = [
   'mode', 'baseUrl', 'askPath', 'healthPath', 'model', 'timeoutMs', 'quickTimeoutMs',
   // v1.5 SPEC §3.9c：三档引擎模式与多模态端点也必须持久化，否则每次重启都退回默认档
@@ -48,6 +59,8 @@ const PERSISTED_CONFIG_KEYS = [
   // v1.7 SPEC §3.10c：记住用户填过的**局域网地址**。电脑 IP 会变，但"上次那个地址"
   // 远比一个写死的默认值有用；切到 JEv 再切回本地时不会丢。
   'localBaseUrl',
+  // v1.7 SPEC §3.12：中转地址（口令是凭据，走 secureKey.js，不在这里）
+  'relayBaseUrl',
 ];
 
 /**
@@ -124,6 +137,15 @@ export default function App() {
   // v1.5：多模态端点的独立连通性状态
   const [visionConn, setVisionConn] = useState(null);
   const [testingVision, setTestingVision] = useState(false);
+  // §3.12：中转模式的独立连通性状态
+  const [relayConn, setRelayConn] = useState(null);
+  const [testingRelay, setTestingRelay] = useState(false);
+  /**
+   * §5.7 反馈回路：用户"最后穿了哪套"的选择记录。
+   * 只存文字与选择（`src/core/feedback.js` 的 `stripImages` 是执行点），
+   * 不存图片、不上传 —— 历史与反馈都不落图片，这是 AGENTS.md 的硬约束。
+   */
+  const [feedback, setFeedback] = useState([]);
   const [showHelp, setShowHelp] = useState(false);
   /**
    * SPEC §3.13 v1.7 · 本次要跑哪个系统：'quick' | 'deep' | 'both'。
@@ -205,6 +227,20 @@ export default function App() {
         if (vision.key && alive) setConfig((prev) => ({ ...prev, visionApiKey: vision.key }));
       } catch {
         /* 读不到就当没配 */
+      }
+      // §3.12：中转口令同样是凭据，独立槽位存（拿到它等于能用我们的上游额度）
+      try {
+        const relay = await loadRelayToken();
+        if (relay.key && alive) setConfig((prev) => ({ ...prev, relayToken: relay.key }));
+      } catch {
+        /* 读不到就当没配 */
+      }
+      // §5.7 反馈回路：只存文字与选择，绝不存图片（AGENTS.md 隐私约束）
+      try {
+        const raw = await AsyncStorage.getItem(FEEDBACK_KEY);
+        if (alive) setFeedback(parseFeedbackList(raw));
+      } catch {
+        /* 反馈损坏 → 空列表 */
       }
       try {
         const list = await loadHistory(AsyncStorage);
@@ -392,10 +428,19 @@ export default function App() {
         }),
       );
 
-      // "两个都要"：System One 成功后再接着跑 System Two。
-      // 用 ref 调 startDeep，因为它定义在本回调之后（直接引用会踩 TDZ / 闭包顺序问题）。
+      /**
+       * SPEC §3.13c · 「两个都要」时**不阻塞**：快速结果已经可以看了，
+       * 深度报告在后台补上（flow 进 `deep_enriching`，结果页显示排名 + 非阻塞提示）。
+       *
+       * 这是第3条改动的核心：深度分析实测 15–37 秒，而用户是在"要出门的那一刻"用它。
+       * 以前这里 `await`，用户就得对着进度页干等半分钟才有东西看。
+       *
+       * 不用 `await` 但仍要**接住失败**：`startDeep` 内部已 dispatch DEEP_FAIL，
+       * 这里只吞掉异常，避免变成未处理的 promise rejection（会污染门禁的 pageErrors）。
+       */
       if (opts.thenDeep === true && typeof startDeepRef.current === 'function') {
-        await startDeepRef.current(null);
+        const deepPromise = startDeepRef.current(null);
+        if (deepPromise && typeof deepPromise.catch === 'function') deepPromise.catch(() => {});
       }
     } catch (err) {
       const info = classifyError(err);
@@ -646,11 +691,95 @@ export default function App() {
     setConfig((prev) => ({ ...prev, apiKey: saved.key }));
   }, []);
 
+  // §5.7：记录"最后穿了哪套"。只存文字与选择，落盘前再走一次 stripImages 兜底。
+  const recordFeedback = useCallback(async ({ lookId, verdict }) => {
+    const quick = flowRef.current?.quick || null;
+    const ranked = (quick && Array.isArray(quick.ranked) ? quick.ranked : []);
+    const row = ranked.find((item) => item && item.lookId === lookId) || null;
+    const record = buildFeedback({
+      lookId,
+      verdict,
+      scoreSnapshot: row && row.scores ? row.scores : {},
+      engineMode: (quick && quick.engineMode) || config.engineMode || null,
+      systemMode: systemModeRef.current || null,
+    });
+    if (!record) return;
+    setFeedback((prev) => {
+      // 同一个 lookId 只保留最新一次回答；否则统计会被重复点击污染
+      const next = [...prev.filter((item) => item.lookId !== lookId), stripImages(record)];
+      AsyncStorage.setItem(FEEDBACK_KEY, serializeFeedbackList(next)).catch(() => {});
+      return next;
+    });
+  }, [config.engineMode]);
+
+  /** 中转区的作用域投影：避免与决策模型地址共用 `baseUrl` 键互相覆盖。 */
+  const relayScopedConfig = {
+    baseUrl: config.relayBaseUrl || config.baseUrl || '',
+    relayToken: config.relayToken || '',
+  };
+  const changeRelay = useCallback((patch) => {
+    const next = {};
+    if ('baseUrl' in patch) {
+      next.relayBaseUrl = patch.baseUrl;
+      // 中转地址同时也是"决策端点地址"：中转模式下 App 只跟中转说话。
+      // 两者保持一致才不会出现"填了中转地址、请求却打到旧地址"。
+      next.baseUrl = patch.baseUrl;
+      next.protocol = 'generic';
+    }
+    if ('relayToken' in patch) next.relayToken = patch.relayToken;
+    changeConfig(next);
+  }, [changeConfig]);
+
   // v1.5：多模态端点的 Key 独立保存（不同供方，换一个不该影响另一个）
   const saveVision = useCallback(async (key) => {
     const saved = await saveVisionKey(key);
     setConfig((prev) => ({ ...prev, visionApiKey: saved.key }));
   }, []);
+
+  // §3.12：中转口令独立保存（拿到它等于能用我们的上游额度，按凭据对待）
+  const saveRelay = useCallback(async (token) => {
+    const saved = await saveRelayToken(token);
+    setConfig((prev) => ({ ...prev, relayToken: saved.key }));
+  }, []);
+
+  /**
+   * §3.12 中转连通性：探中转的 `/health`（该端点**免鉴权**，便于先确认地址可达）。
+   * 与决策端点的 `diagnoseDecisionEndpoint` 不同：中转的 health 不探上游，
+   * 所以这里只回答"地址通不通"，不假装知道上游是否可用。
+   */
+  const testRelay = useCallback(async () => {
+    setTestingRelay(true);
+    try {
+      const started = Date.now();
+      const base = normalizeBaseUrl(config.baseUrl || config.relayBaseUrl || '');
+      if (!base) throw new Error('missing-base-url');
+      const res = await fetch(`${base}/health`, { method: 'GET' });
+      const ms = Date.now() - started;
+      let body = null;
+      try {
+        body = await res.json();
+      } catch {
+        body = null;
+      }
+      if (res.ok && body && body.ok) {
+        const up = body.upstream || {};
+        const decisionOk = up.decision && up.decision.ok !== false;
+        const visionOk = up.vision && up.vision.ok !== false;
+        setRelayConn({
+          ok: true,
+          ms,
+          detail: decisionOk && visionOk ? '中转已连通' : '中转可达，但服务端上游可能没配好',
+        });
+      } else {
+        setRelayConn({ ok: false, ms, detail: `HTTP ${res.status}` });
+      }
+    } catch (err) {
+      const info = classifyError(err);
+      setRelayConn({ ok: false, ms: 0, detail: info.message });
+    } finally {
+      setTestingRelay(false);
+    }
+  }, [config.baseUrl, config.relayBaseUrl]);
 
   /** 多模态端点的连通性测试：走 visionBaseUrl 的最小真实请求。 */
   const testVision = useCallback(async () => {
@@ -850,6 +979,9 @@ export default function App() {
         progress={progress}
         staleHint={staleHint}
         onRerun={startQuick}
+        // §5.7：反馈回路（只收集选择，不收集图片）
+        feedback={feedback}
+        onFeedback={recordFeedback}
       />
     );
   } else if (tab === 'history') {
@@ -865,6 +997,13 @@ export default function App() {
         keySecure={keySecure}
         onSaveKey={saveKey}
         onSaveVisionKey={saveVision}
+        // §3.12 中转模式（前置空白由 RelayConfig 自带 marginHorizontal，平铺即可）
+        relayConfig={relayScopedConfig}
+        onChangeRelay={changeRelay}
+        onTestRelay={testRelay}
+        relayConn={relayConn}
+        testingRelay={testingRelay}
+        onSaveRelayToken={saveRelay}
         onTestVision={testVision}
         visionConn={visionConn}
         testingVision={testingVision}
