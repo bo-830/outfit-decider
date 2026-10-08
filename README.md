@@ -8,6 +8,38 @@
 **操作手册**：[`docs/RUNBOOK.md`](docs/RUNBOOK.md)（真机扫码、Laya 局域网部署、故障复现）
 **视觉规范**：[`docs/DESIGN.md`](docs/DESIGN.md)（设计令牌、11 组对比度实测值、动效参数）
 
+<p>
+  <img alt="Expo SDK" src="https://img.shields.io/badge/Expo-57-000020?logo=expo" />
+  <img alt="React Native" src="https://img.shields.io/badge/React%20Native-0.86-61DAFB?logo=react" />
+  <img alt="tests" src="https://img.shields.io/badge/tests-293%20passing-brightgreen" />
+</p>
+
+---
+
+## 0. English summary
+
+**Snap a photo, decide what to wear.** Upload 1–4 outfit photos and get a ranking — a fast structured
+score first, and an optional multimodal deep report behind it.
+
+- **Two engines.** *System One* returns six structured scores only (0–5, one decimal, **no prose**).
+  *System Two* returns a three-part Chinese report from a multimodal model. In "both" mode the quick
+  ranking shows up first and the deep report fills in behind it.
+- **Three ways to wire a model** (pick one):
+  1. **Relay service** — deploy `relay/relay-server.mjs`; the app only needs an address and one
+     passphrase. Upstream keys live on the server.
+  2. **Straight to TypeSafe JEv** — no computer needed. Point the app at
+     `https://api.typesafe.ai/v1` and paste your own key. **You also need a separate vision model**,
+     because [JEv does not generate text](https://docs.typesafe.ai/introduction) and describing a
+     photo requires it.
+  3. **Self-hosted Laya** *(experimental)* — a local System 1 decision engine. See
+     [§7](#7-laya-本地引擎配置实验性) below. Our own measurement puts Laya-only ranking near
+     coin-flip (2/4), so it is an opt-in experiment, **not** a requirement.
+- **Privacy is a hard constraint, not marketing**: photos live in memory only and are never written
+  to disk; API keys stay in the device keystore; there is no analytics or telemetry.
+- **Build the APK yourself**: `eas build --platform android --profile preview`.
+
+The rest of this document is in Chinese.
+
 ---
 
 ## 1. 它解决什么问题
@@ -104,10 +136,122 @@ docs/          SPEC（唯一真源）/ DESIGN / RUNBOOK
 3. **不向第三方上报**：除你在设置页配置的 baseUrl 之外，App 不发任何出网请求（无埋点、无遥测）。
 4. Laya 本地模式的数据交互只发生在你的局域网内。
 
+## 7. Laya 本地引擎配置（实验性）
+
+> **先想清楚要不要跑它。** 实测结论（见 [§8](#8-真实-laya-的实测限制重要别跳过)）：Laya 单独排序 **2/4**，
+> 接近掷硬币；它有用必须再接一个多模态纠正，而代价是你得常驻一台电脑。
+> **如果嫌麻烦，用中转服务或直连 JEv 就够了。** 想试再看下面四步。
+
+[Laya](https://github.com/NandhaKishorM/laya) 是**非自回归 System 1 决策引擎**：一次前向传播回答
+`choice` / `score` / `noul` 三种类型化问题，100+ 语言，**不生成文本**（所以没有解析、也没有幻觉）。
+Apache 2.0 许可，可完全自托管、成本为 $0。
+
+### 第 1 步 · 装 Laya（在电脑上，不是手机）
+
+```bash
+python -m venv .venv
+# Windows PowerShell:
+.\.venv\Scripts\python.exe -m pip install "laya[serve]"
+# macOS / Linux:
+.venv/bin/python -m pip install "laya[serve]"
+```
+
+需要 Python 3.10+；`[serve]` 是 HTTP 服务所需依赖。首次运行会从 Hugging Face 下载 checkpoint
+（english 约 421M 参数），需要联网。可以放到任意目录，把 `laya-service\` 当成模板复制过去。
+
+### 第 2 步 · 起 HTTP 服务
+
+本仓库自带启动脚本 `laya-service\start-laya.cmd`（Windows），它做的事：
+
+```cmd
+set LAYA_HOST=0.0.0.0        REM 真机要能访问，必须是 0.0.0.0 而不是 127.0.0.1
+set LAYA_PORT=8000
+set LAYA_MODELS=english      REM 只预载已缓存的 checkpoint，省内存
+set LAYA_PRELOAD=1
+set LAYA_DEFAULT_MODEL=english
+set LAYA_THREADS=8           REM 别超过物理核数
+set LAYA_MAX_CONCURRENT=4
+set LAYA_DEVICE=cpu          REM 有 NVIDIA 卡可改 cuda
+.venv\Scripts\laya-serve.exe
+```
+
+起来后监听 `0.0.0.0:8000`，健康检查 `GET /health`。
+
+<details>
+<summary>环境变量表</summary>
+
+| 变量 | 默认 | 含义 |
+|---|---|---|
+| `LAYA_HOST` / `LAYA_PORT` | `127.0.0.1` / `8000` | 监听地址；真机访问必须 `0.0.0.0` |
+| `LAYA_MODELS` | `english,multilingual` | 预载哪些 checkpoint（逗号分隔） |
+| `LAYA_PRELOAD` | `1` | 启动即加载，而非首次请求才加载 |
+| `LAYA_DEFAULT_MODEL` | — | 默认 checkpoint（本项目用 `english` 省内存） |
+| `LAYA_THREADS` | torch 默认 | CPU 推理线程数，别超过物理核数 |
+| `LAYA_DEVICE` | 自动 | `cpu` / `cuda` / `xpu`；自动顺序 CUDA → MPS → CPU |
+| `LAYA_MAX_CONCURRENT` | — | 并发上限 |
+| `LAYA_MAX_LOADED` | `2` | 常驻 checkpoint 上限（内存紧张设 1） |
+
+</details>
+
+### 第 3 步 · 起协议适配器（不能跳过）
+
+**Laya 说的是自己的方言，而 App 发的是数组式问题列表** —— 适配器负责双向翻译，并补上 CORS 与上游健康检查。
+没有它，App 的请求形状对不上，会直接失败。
+
+```bash
+node tools/laya-adapter.mjs          # 监听 :8787，转发到 :8000
+```
+
+配置写在 `.env.local`（**已被 gitignore，不会入库**）：
+
+```ini
+LAYA_PROTOCOL=laya
+LAYA_UPSTREAM=http://127.0.0.1:8000
+LAYA_ADAPTER_PORT=8787
+```
+
+> 附注：适配器也支持 `LAYA_PROTOCOL=jev`，把上游换成 TypeSafe JEv 的云端地址，
+> 这样"经适配器用 JEv"和"App 直连 JEv"两条路都通。`tools/use-jev.bat` 可一键切换。
+
+### 第 4 步 · App 设置页填什么
+
+设置页 →「用哪家的模型打分」→ 点 **「Laya 本地」**（会自动填好 askPath 与协议），然后：
+
+| 字段 | 填什么 |
+|---|---|
+| baseUrl | `http://<电脑的局域网 IP>:8787` |
+| askPath | `/ask`（点「Laya 本地」自动填） |
+| API Key | 留空 |
+| 打分档位 | 选「本地打分 + 多模态纠正」 |
+| 能看图的模型 | **必须配**（Base URL + 模型名 + Key），否则纠正不会生效 |
+
+> ⚠️ **真机不能填 `127.0.0.1`** —— 那指手机自己。模拟器可以，或真机做 `adb reverse`。
+> 电脑的局域网 IP 会随路由器变化，变了要改这里；填环回地址时 App 会明确提醒你。
+
+### 一键启动（Windows 本机开发）
+
+双击 `tools\start-outfit-decider.bat`：依次起 Laya、适配器、Metro，打印局域网 IP 并自检；
+停止用 `tools\stop-outfit-decider.bat`。
+
+### 排查
+
+| 现象 | 原因 |
+|---|---|
+| `连不上决策模型地址` | 适配器没起，或地址填错（真机填了 `127.0.0.1`） |
+| 能开但拿不到分数 | 适配器 `/health` 里 `upstream.ok=false` → Laya 服务挂了 |
+| 纠正没生效 | 「能看图的模型」没配；或勾了"已配在服务端"但服务端其实没有 |
+| 分数全贴到 5 分 | 模型整轮量纲错配 —— 现在会判失败并重试，不再静默夹制 |
+
+---
+
 ## 8. 真实 Laya 的实测限制（重要，别跳过）
 
-本机已装好真实的 Laya 决策模型（PyPI `laya` 0.3.27，部署在 `..\laya-service\`），
-`laya.serve` 自称实现的正是 **TypeSafe Jev `/v1/systemone`** 协议 —— 需求里的 JEv 与 Laya 是同一套协议的两个面。
+本仓库自带 Laya 启动脚本（PyPI `laya`，见 `laya-service\start-laya.cmd`）与协议适配器
+`tools/laya-adapter.mjs`，完整配置步骤见 [§7](#7-laya-本地引擎配置实验性)。
+
+值得注意：`laya.serve` 自称实现的正是 **TypeSafe Jev `/v1/systemone`** 协议 ——
+需求里的 JEv 与 Laya 本质上是**同一套协议的两个实现**（一个闭源云端、一个开源可自托管）。
+所以本项目只写了一套协议翻译，两边的差异只有档位数（Laya 3 档需映射到 0–5，JEv 6 档直通）。
 
 **基础设施层面全部通过**：协议正确、确定性（同输入同输出）、离线、约 1s 往返、`answer_confidence` 语义正确。
 

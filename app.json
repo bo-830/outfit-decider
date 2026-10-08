@@ -38,6 +38,12 @@
         }
       ],
       "expo-secure-store"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "acd741ad-4392-4ec3-848c-1500c4f7998f"
+      }
+    },
+    "owner": "bo-830"
   }
 }
