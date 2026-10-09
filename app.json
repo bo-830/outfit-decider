@@ -34,7 +34,8 @@
         "expo-image-picker",
         {
           "photosPermission": "允许 $(PRODUCT_NAME) 选择穿搭照片（仅用于本次分析，不保存原图）",
-          "cameraPermission": "允许 $(PRODUCT_NAME) 拍摄穿搭照片（仅用于本次分析，不保存原图）"
+          "cameraPermission": "允许 $(PRODUCT_NAME) 拍摄穿搭照片（仅用于本次分析，不保存原图）",
+          "microphonePermission": false
         }
       ],
       "expo-secure-store"
